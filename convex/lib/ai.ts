@@ -8,6 +8,7 @@ import {
   type JSONValue,
 } from "ai";
 import { z } from "zod";
+import type { OpenAILanguageModelResponsesOptions } from "@ai-sdk/openai";
 import { logger } from "../../shared/lib/logger";
 import { getCurrentUTCTimestamp } from "../../shared/lib/utils/time/timeUtils";
 import { env } from "../_generated/server";
@@ -17,9 +18,20 @@ import { internal } from "../_generated/api";
 import {
   createAIProvider,
   getAIProvider,
+  getAIModelProvider,
   getConfiguredAIModel,
 } from "./aiProvider";
 export { createAIProvider } from "./aiProvider";
+
+export const OPENAI_AGENT_OPTIONS = {
+  reasoningMode: "pro",
+  reasoningEffort: "medium",
+} as const satisfies OpenAILanguageModelResponsesOptions;
+
+export const OPENAI_SIMPLE_OPTIONS = {
+  reasoningMode: "standard",
+  reasoningEffort: "none",
+} as const satisfies OpenAILanguageModelResponsesOptions;
 import {
   combineStructuredGenerationErrors,
   getStructuredAttemptProviderOptions,
@@ -395,7 +407,10 @@ export const PINNED_VISION_PROVIDER_OPTIONS: OpenRouterProviderOptions =
   });
 
 export function supportsExplicitPromptCaching(model: string): boolean {
-  return getAIProvider() === "openrouter" && isPremiumOpenAIChatModel(model);
+  return (
+    getAIModelProvider(model) === "openrouter" &&
+    isPremiumOpenAIChatModel(model)
+  );
 }
 
 export type ModelRouting = RoutingPreset | "onboarding";
@@ -419,7 +434,7 @@ export function getOpenRouterExtraBody(
 }
 
 function getModelForRouting(routing: ModelRouting): RoutingModelConfig {
-  if (getAIProvider() === "openai") {
+  if (getAIProvider() !== "openrouter") {
     const config =
       routing === "onboarding"
         ? {
@@ -430,8 +445,12 @@ function getModelForRouting(routing: ModelRouting): RoutingModelConfig {
         : {
             ...getRoutingPresetConfig()[routing],
             model: routing === "fast" ? FAST_MODEL : REASONING_MODEL,
+            providerOptions:
+              routing === "fast"
+                ? FAST_PROVIDER_OPTIONS
+                : AGENT_PROVIDER_OPTIONS,
           };
-    return { ...config, providerLabel: "openai" };
+    return { ...config, providerLabel: getAIModelProvider(config.model) };
   }
   if (routing === "onboarding") {
     return {
@@ -537,6 +556,10 @@ export function extractUsage(result: {
     modelSelected: metadata?.model,
     providerSelected:
       metadata?.provider ??
+      (result.providerMetadata?.openai ||
+      result.experimental_providerMetadata?.openai
+        ? "openai"
+        : undefined) ??
       (getAIProvider() === "openai" ? "openai" : undefined),
     cacheReadTokens,
     cacheWriteTokens: usage.inputTokenDetails?.cacheWriteTokens,
@@ -723,6 +746,11 @@ export async function robustGenerateObject<T>({
         telemetry,
       });
     } catch (error) {
+      if (
+        getAIModelProvider(FAST_MODEL) !== getAIModelProvider(REASONING_MODEL)
+      ) {
+        throw error;
+      }
       const errorMessage =
         error instanceof Error ? error.message : "Unknown error";
       logJsonAttemptFailure(
@@ -774,7 +802,12 @@ export async function robustGenerateObject<T>({
       telemetry,
     });
   } catch (error) {
-    if (!fallbackRouting || fallbackRouting === routing) {
+    if (
+      !fallbackRouting ||
+      fallbackRouting === routing ||
+      getAIModelProvider(getModelForRouting(routing).model) !==
+        getAIModelProvider(getModelForRouting(fallbackRouting).model)
+    ) {
       throw error;
     }
 
@@ -840,7 +873,7 @@ export async function generateTextWithJsonParse<T>({
   for (let attempt = 0; attempt < maxRetries; attempt++) {
     const startTime = getCurrentUTCTimestamp();
     const attemptRouting =
-      getAIProvider() === "openai"
+      getAIModelProvider(modelConfig.model) === "openai"
         ? {
             providerOptions: undefined,
             configuredProvider: "openai",
@@ -865,7 +898,8 @@ export async function generateTextWithJsonParse<T>({
           modelConfig.model,
           nativeStructuredOutput
             ? { plugins: [{ id: "response-healing" }] }
-            : undefined
+            : undefined,
+          routing === "fast" ? OPENAI_SIMPLE_OPTIONS : OPENAI_AGENT_OPTIONS
         ) as any,
         system: `${system}\n\nIMPORTANT: You MUST respond with ONLY valid JSON. No markdown, no explanations, just one JSON object that validates against the provided JSON Schema.`,
         prompt: `${prompt}\n\nReturn exactly one JSON object matching this JSON Schema:\n${jsonSchema}\n\nDo not rename keys. Do not wrap the object in another property. Do not return an array unless the schema root is an array.`,
@@ -967,7 +1001,10 @@ export async function generateTextWithJsonParse<T>({
         });
       }
 
-      if (getAIProvider() === "openrouter" && attemptFailure.providerSelected) {
+      if (
+        getAIModelProvider(modelConfig.model) === "openrouter" &&
+        attemptFailure.providerSelected
+      ) {
         const providerRouting = modelConfig.providerOptions.openrouter.provider;
         const providerSlug = resolveOpenRouterProviderSlug({
           providerName: attemptFailure.providerSelected,

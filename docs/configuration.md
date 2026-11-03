@@ -217,13 +217,36 @@ For billing, register `https://<your-deployment>.convex.site/polar/events` (or t
 
 ## Native OpenAI For Internal Deployments
 
-Set `AI_PROVIDER=openai` and `OPENAI_API_KEY` on the selected **Convex deployment** to use native OpenAI for core generation, agents, vision, autocomplete, and embeddings. No `OPENROUTER_API_KEY` is needed in this mode, and failures never switch to OpenRouter. The installed AI SDK uses OpenAI Chat Completions for chat models. With `AI_PROVIDER` unset or `openrouter`, existing OpenRouter behavior stays unchanged, including OpenRouter-first embeddings and optional native embedding fallback.
+Set `AI_PROVIDER=openai` and `OPENAI_API_KEY` on the selected **Convex deployment** to use native OpenAI for core generation, agents, vision, autocomplete, and embeddings. No `OPENROUTER_API_KEY` is needed in this mode, and failures never switch to OpenRouter. The installed OpenAI SDK uses Responses for native GPT-6 models and retains Chat Completions for older model overrides. Native GPT-6 requires Responses access on the OpenAI key. With `AI_PROVIDER` unset or `openrouter`, existing OpenRouter behavior stays unchanged, including OpenRouter-first embeddings and optional native embedding fallback.
 
 Native defaults are `gpt-4.1-mini` for fast helpers and autocomplete, `gpt-4.1` for reasoning, onboarding, setup/main agents and vision, and `text-embedding-3-small` for embeddings. Override the existing `AI_*_MODEL` variables with a model available to your OpenAI project. Both native IDs and `openai/<native-id>` are accepted; foreign-provider IDs and `gpt-oss` models are rejected before a request. Remove old Kimi/GPT-OSS overrides when switching modes. Model availability and account limits must be checked against the actual OpenAI project; defaults are not a promise of access.
 
 OpenRouter routing presets, plugins, explicit prompt caching and session routing are not sent to OpenAI. Optional Jev evaluation/shadow diagnostics require OpenRouter and explicitly fail if invoked in native mode; leave `JEV_PREFILTER_MODE` unset or `off`. Core qualification does not depend on Jev. Native token/cache usage is preserved, but this application does not receive native USD cost in API metadata: consult OpenAI billing for actual spending. A monthly budget is not enforced by selecting a provider.
 
 These changes select the AI provider only. Existing plan requirements and social data-provider requirements still apply. Reference: [AI SDK OpenAI provider](https://ai-sdk.dev/providers/ai-sdk-providers/openai).
+
+### Hybrid OpenAI and OpenRouter
+
+Set `AI_PROVIDER=hybrid` with both provider keys to route native IDs and `openai/<id>` to OpenAI, and other namespaced IDs to OpenRouter. For example:
+
+```dotenv
+AI_PROVIDER=hybrid
+AI_FAST_MODEL=gpt-6-luna
+AI_AUTOCOMPLETE_MODEL=gpt-6-luna
+AI_REASONING_MODEL=gpt-6-luna
+AI_ONBOARDING_MODEL=gpt-6-luna
+AI_SETUP_AGENT_MODEL=gpt-6-luna
+AI_MAIN_AGENT_MODEL=gpt-6-luna
+AI_VISION_MODEL=moonshotai/kimi-k2.6
+AI_TEXT_EMBEDDING_MODEL=text-embedding-3-small
+AI_JEV_MODEL=typesafe/jev-1.13
+```
+
+The same Luna model ID uses distinct, explicit role settings: fast helpers and autocomplete use `reasoning.mode=standard` with effort `none`; reasoning, onboarding, setup, main and prospect agents use `reasoning.mode=pro` with effort `medium`. Pro is a Responses request mode, not a different native model ID. The official OpenAI SDK handles model capabilities and unsupported sampling parameters. Responses use `store: false`; encrypted reasoning is preserved across tool turns. Native GPT-6 outreach has a 4,096-token output budget per step, including reasoning; older models and OpenRouter keep the existing 1,024-token limit. Existing timeouts remain unchanged.
+
+Kimi vision and optional Jev Decisions use only OpenRouter. Embeddings use only native OpenAI in hybrid mode, preserving existing model labels and vectors. Model failures do not switch between providers, including structured-generation fallbacks. No OpenAI role receives OpenRouter plugins, session routing or cache options. Both accounts require separately available credits and model access; verify actual inference, not just key metadata, before enabling a route. Provider and model configuration does not change either account's billing limits. Unset model variables retain the previous native GPT-4.1/GPT-4.1-mini defaults.
+
+References: [AI SDK OpenAI provider](https://ai-sdk.dev/providers/ai-sdk-providers/openai), [OpenAI Responses](https://developers.openai.com/api/docs/guides/migrate-to-responses), and [reasoning modes](https://developers.openai.com/api/docs/guides/reasoning).
 
 ## Plan Availability
 

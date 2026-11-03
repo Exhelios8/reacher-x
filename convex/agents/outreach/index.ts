@@ -3,11 +3,12 @@
 "use node";
 
 import { Agent, type ContextHandler } from "@convex-dev/agent";
-import { wrapLanguageModel } from "ai";
+import { defaultSettingsMiddleware, wrapLanguageModel } from "ai";
 import { components, internal } from "../../_generated/api";
-import { createAIProvider } from "../../lib/aiProvider";
+import { createAIProvider, getAIModelProvider } from "../../lib/aiProvider";
 import {
   type OpenRouterProviderOptions,
+  OPENAI_AGENT_OPTIONS,
   OUTREACH_AGENT_MODEL,
   OUTREACH_AGENT_PROMPT_CACHE_OPTIONS,
   OUTREACH_AGENT_PROVIDER_OPTIONS,
@@ -122,16 +123,30 @@ function createOutreachLanguageModel(
   }
 ) {
   return wrapLanguageModel({
-    model: provider(modelId, {
-      extraBody: {
-        ...getOpenRouterExtraBody(providerOptions),
-        ...(options?.enableExplicitPromptCaching
-          ? OUTREACH_AGENT_PROMPT_CACHE_OPTIONS
-          : {}),
-        ...(options?.sessionId ? { session_id: options.sessionId } : {}),
+    model: provider(
+      modelId,
+      {
+        extraBody: {
+          ...getOpenRouterExtraBody(providerOptions),
+          ...(options?.enableExplicitPromptCaching
+            ? OUTREACH_AGENT_PROMPT_CACHE_OPTIONS
+            : {}),
+          ...(options?.sessionId ? { session_id: options.sessionId } : {}),
+        },
       },
-    }) as any,
+      OPENAI_AGENT_OPTIONS
+    ) as any,
     middleware: [
+      defaultSettingsMiddleware({
+        settings: {
+          // Reasoning shares the output budget with visible text and tool arguments.
+          maxOutputTokens:
+            getAIModelProvider(modelId) === "openai" &&
+            modelId.startsWith("gpt-6")
+              ? 4096
+              : 1024,
+        },
+      }),
       ...(options?.enableExplicitPromptCaching
         ? [outreachPromptCacheMiddleware]
         : []),
@@ -166,7 +181,6 @@ export const outreachVisionLanguageModel = createOutreachLanguageModel(
   PINNED_VISION_PROVIDER_OPTIONS
 );
 
-const OUTREACH_AGENT_MAX_OUTPUT_TOKENS = 1024;
 const OUTREACH_AGENT_MAX_RETRIES = 0;
 
 // ============================================================================
@@ -541,7 +555,6 @@ export const outreachAgent = new Agent<OutreachAgentCustomContext>(
     // Allow multi-step for complex plan refinement
     maxSteps: 15,
     callSettings: {
-      maxOutputTokens: OUTREACH_AGENT_MAX_OUTPUT_TOKENS,
       // OpenRouter already performs provider failover. Retrying the whole HTTP
       // request here can add another upstream timeout before the user sees text.
       maxRetries: OUTREACH_AGENT_MAX_RETRIES,

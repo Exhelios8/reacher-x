@@ -9,6 +9,7 @@ import { components, internal } from "../_generated/api";
 import { createAIProvider } from "../lib/aiProvider";
 import {
   type OpenRouterProviderOptions,
+  OPENAI_AGENT_OPTIONS,
   OUTREACH_AGENT_MODEL,
   OUTREACH_AGENT_PROVIDER_OPTIONS,
   PINNED_AGENT_MODEL,
@@ -70,9 +71,11 @@ function createWorkspaceLanguageModel(
   providerOptions: OpenRouterProviderOptions
 ) {
   return wrapLanguageModel({
-    model: provider(modelId, {
-      extraBody: getOpenRouterExtraBody(providerOptions),
-    }) as any,
+    model: provider(
+      modelId,
+      { extraBody: getOpenRouterExtraBody(providerOptions) },
+      OPENAI_AGENT_OPTIONS
+    ) as any,
     middleware: openRouterMetadataMiddleware,
   });
 }

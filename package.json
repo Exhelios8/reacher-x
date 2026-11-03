@@ -34,7 +34,7 @@
     "deploy:demo:vinext": "npm run build:demo:vinext && cd demos/app && vinext-cloudflare deploy --skip-build"
   },
   "dependencies": {
-    "@ai-sdk/openai": "^3.0.72",
+    "@ai-sdk/openai": "^3.0.136",
     "@ai-sdk/provider-utils": "^4.0.30",
     "@ai-sdk/react": "^3.0.209",
     "@calcom/embed-react": "^1.5.3",

@@ -174,20 +174,23 @@ test("propagates the fallback error when both providers fail", async () => {
   ).rejects.toThrow("Insufficient quota");
 });
 
-test("native mode uses OpenAI even when an OpenRouter key is present and never fails over", async () => {
-  stubBothProviders();
-  vi.stubEnv("AI_PROVIDER", "openai");
-  vi.stubEnv("AI_TEXT_EMBEDDING_MODEL", "text-embedding-3-small");
-  const model = expectModelInstance(getTextEmbeddingModel());
-  openAIEmbeddingModel.doEmbed.mockRejectedValue(
-    new Error("Native quota exhausted")
-  );
-  await expect(model.doEmbed({ values: ["local fixture"] })).rejects.toThrow(
-    "Native quota exhausted"
-  );
-  expect(openAIEmbeddingModel.doEmbed).toHaveBeenCalledOnce();
-  expect(openRouterEmbeddingModel.doEmbed).not.toHaveBeenCalled();
-});
+test.each(["openai", "hybrid"])(
+  "%s mode uses OpenAI even when an OpenRouter key is present and never fails over",
+  async (mode) => {
+    stubBothProviders();
+    vi.stubEnv("AI_PROVIDER", mode);
+    vi.stubEnv("AI_TEXT_EMBEDDING_MODEL", "text-embedding-3-small");
+    const model = expectModelInstance(getTextEmbeddingModel());
+    openAIEmbeddingModel.doEmbed.mockRejectedValue(
+      new Error("Native quota exhausted")
+    );
+    await expect(model.doEmbed({ values: ["local fixture"] })).rejects.toThrow(
+      "Native quota exhausted"
+    );
+    expect(openAIEmbeddingModel.doEmbed).toHaveBeenCalledOnce();
+    expect(openRouterEmbeddingModel.doEmbed).not.toHaveBeenCalled();
+  }
+);
 
 test("native embedding mode rejects foreign models and cannot fall back when its key is missing", () => {
   stubOpenRouterOnly();

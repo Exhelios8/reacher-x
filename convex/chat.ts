@@ -3,7 +3,7 @@
 // Docs: https://docs.convex.dev/agents/streaming
 
 import { v } from "convex/values";
-import { getAIProvider } from "./lib/aiProvider";
+import { getAIModelProvider } from "./lib/aiProvider";
 import { getFunctionAddress, paginationOptsValidator } from "convex/server";
 import type { LanguageModel, ModelMessage } from "ai";
 import {
@@ -4000,19 +4000,25 @@ export const resumePlanBatchAgentResponse = internalAction({
         result: responseContext.result,
       });
       const { mainAgent, workspaceLanguageModel } = await loadWorkspaceAgents();
-      const attempts = [
-        {
-          model: undefined,
-          modelId: OUTREACH_AGENT_MODEL,
-        },
-        {
-          model: workspaceLanguageModel,
-          modelId: PINNED_AGENT_MODEL,
-        },
-      ] satisfies Array<{
-        model: LanguageModel | undefined;
-        modelId: string;
-      }>;
+      const attempts = (
+        [
+          {
+            model: undefined,
+            modelId: OUTREACH_AGENT_MODEL,
+          },
+          {
+            model: workspaceLanguageModel,
+            modelId: PINNED_AGENT_MODEL,
+          },
+        ] satisfies Array<{
+          model: LanguageModel | undefined;
+          modelId: string;
+        }>
+      ).filter(
+        (attempt) =>
+          getAIModelProvider(attempt.modelId) ===
+          getAIModelProvider(OUTREACH_AGENT_MODEL)
+      );
       let responseText = "";
       let responseFinishReason:
         | "stop"
@@ -4099,7 +4105,7 @@ export const resumePlanBatchAgentResponse = internalAction({
           status: "success",
           finishReason: responseFinishReason,
           model: responseModelId,
-          provider: getAIProvider(),
+          provider: getAIModelProvider(responseModelId),
         },
       });
       await ctx.runMutation(

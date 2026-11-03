@@ -1,7 +1,11 @@
-import { createOpenAI } from "@ai-sdk/openai";
+import {
+  createOpenAI,
+  type OpenAILanguageModelResponsesOptions,
+} from "@ai-sdk/openai";
 import { createOpenRouter } from "@openrouter/ai-sdk-provider";
 import {
   wrapLanguageModel,
+  defaultSettingsMiddleware,
   type JSONSchema7,
   type LanguageModelMiddleware,
 } from "ai";
@@ -47,15 +51,17 @@ function nativeToolSchema(schema: JSONSchema7): JSONSchema7 {
 
 const nativeToolSchemaMiddleware: LanguageModelMiddleware = {
   specificationVersion: "v3",
-  async transformParams({ params }) {
+  async transformParams({ model, params }) {
     return {
       ...params,
       tools: params.tools?.map((tool) =>
-        tool.type === "function" && tool.inputSchema.anyOf
+        tool.type === "function" &&
+        (tool.inputSchema.anyOf || model.provider === "openai.responses")
           ? {
               ...tool,
               inputSchema: nativeToolSchema(tool.inputSchema),
-              strict: false,
+              // Keep optional inputs optional; the SDK still validates the original schema.
+              strict: tool.inputSchema.anyOf ? false : (tool.strict ?? false),
             }
           : tool
       ),
@@ -63,12 +69,25 @@ const nativeToolSchemaMiddleware: LanguageModelMiddleware = {
   },
 };
 
-export function getAIProvider(): "openrouter" | "openai" {
+export function getAIProvider(): "openrouter" | "openai" | "hybrid" {
   const provider = process.env.AI_PROVIDER?.trim() || "openrouter";
-  if (provider !== "openrouter" && provider !== "openai") {
-    throw new Error("AI_PROVIDER must be openrouter or openai.");
+  if (
+    provider !== "openrouter" &&
+    provider !== "openai" &&
+    provider !== "hybrid"
+  ) {
+    throw new Error("AI_PROVIDER must be openrouter, openai or hybrid.");
   }
   return provider;
+}
+
+export function getAIModelProvider(model: string): "openrouter" | "openai" {
+  const provider = getAIProvider();
+  return provider === "hybrid"
+    ? model.startsWith("openai/") || !model.includes("/")
+      ? "openai"
+      : "openrouter"
+    : provider;
 }
 
 export function getNativeOpenAIModelId(model: string): string {
@@ -90,41 +109,60 @@ export function getConfiguredAIModel(
   openRouterDefault: string,
   openAIDefault: string
 ): string {
-  const native = getAIProvider() === "openai";
+  const native = getAIProvider() !== "openrouter";
   const model = getConfiguredModel(
     key,
     native ? openAIDefault : openRouterDefault
   );
-  return native ? getNativeOpenAIModelId(model) : model;
+  return getAIModelProvider(model) === "openai"
+    ? getNativeOpenAIModelId(model)
+    : model;
 }
 
 export function createAIProvider() {
-  if (getAIProvider() === "openai") {
-    const apiKey = process.env.OPENAI_API_KEY?.trim();
-    if (!apiKey)
-      throw new Error("[AI] Missing OPENAI_API_KEY environment variable.");
-    const provider = createOpenAI({ apiKey });
-    // Native requests must not inherit OpenRouter plugins, routing or cache settings.
-    return (
-      model: string,
-      _settings?: Parameters<ReturnType<typeof createOpenRouter>>[1]
-    ) =>
-      wrapLanguageModel({
-        model: provider.chat(getNativeOpenAIModelId(model)),
-        middleware: nativeToolSchemaMiddleware,
-      });
+  const selectedProvider = getAIProvider();
+  const openAIKey = process.env.OPENAI_API_KEY?.trim();
+  const openRouterKey = process.env.OPENROUTER_API_KEY?.trim();
+  if (selectedProvider !== "openrouter" && !openAIKey) {
+    throw new Error("[AI] Missing OPENAI_API_KEY environment variable.");
   }
-
-  const apiKey = process.env.OPENROUTER_API_KEY;
-  if (!apiKey) {
+  if (selectedProvider !== "openai" && !openRouterKey) {
     throw new Error(
       "[AI] Missing OPENROUTER_API_KEY environment variable. Get it from: https://openrouter.ai/settings/keys"
     );
   }
-  const provider = createOpenRouter({
-    apiKey,
+  const native = createOpenAI({ apiKey: openAIKey });
+  const openRouter = createOpenRouter({
+    apiKey: openRouterKey,
     headers: { "HTTP-Referer": "https://reacherx.com", "X-Title": "ReacherX" },
   });
-  return (model: string, settings?: Parameters<typeof provider>[1]) =>
-    provider(model, settings);
+  return (
+    model: string,
+    settings?: Parameters<typeof openRouter>[1],
+    nativeOptions?: OpenAILanguageModelResponsesOptions
+  ) => {
+    if (getAIModelProvider(model) === "openrouter") {
+      return openRouter(model, settings);
+    }
+    const modelId = getNativeOpenAIModelId(model);
+    const responses = modelId.startsWith("gpt-6");
+    // Native requests never inherit OpenRouter plugins, routing or cache settings.
+    return wrapLanguageModel({
+      model: responses ? native.responses(modelId) : native.chat(modelId),
+      middleware: [
+        nativeToolSchemaMiddleware,
+        ...(responses
+          ? [
+              defaultSettingsMiddleware({
+                settings: {
+                  providerOptions: {
+                    openai: { ...nativeOptions, store: false },
+                  },
+                },
+              }),
+            ]
+          : []),
+      ],
+    });
+  };
 }

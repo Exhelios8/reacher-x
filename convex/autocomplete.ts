@@ -1,7 +1,7 @@
 "use node";
 
 import { generateText } from "ai";
-import { getAIProvider } from "./lib/aiProvider";
+import { getAIModelProvider } from "./lib/aiProvider";
 import { v } from "convex/values";
 import { action } from "./lib/functionBuilders";
 import { components, internal } from "./_generated/api";
@@ -9,6 +9,7 @@ import type { Doc, Id } from "./_generated/dataModel";
 import {
   AUTOCOMPLETE_MODEL,
   AUTOCOMPLETE_PROVIDER_OPTIONS,
+  OPENAI_SIMPLE_OPTIONS,
   createAIProvider,
   extractJsonPayload,
   extractUsage,
@@ -482,13 +483,17 @@ Rules:
     let result;
     try {
       result = await generateText({
-        model: provider(AUTOCOMPLETE_MODEL) as any,
+        model: provider(
+          AUTOCOMPLETE_MODEL,
+          undefined,
+          OPENAI_SIMPLE_OPTIONS
+        ) as any,
         system: systemPrompt,
         prompt,
         temperature: 0.15,
         maxOutputTokens: INLINE_AUTOCOMPLETE_MAX_OUTPUT_TOKENS,
         providerOptions:
-          getAIProvider() === "openai"
+          getAIModelProvider(AUTOCOMPLETE_MODEL) === "openai"
             ? undefined
             : AUTOCOMPLETE_PROVIDER_OPTIONS,
         abortSignal: cancellationWatcher.abortSignal,

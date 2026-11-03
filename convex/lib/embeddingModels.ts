@@ -39,7 +39,7 @@ export function getTextEmbeddingModel(): EmbeddingModel {
     DEFAULT_TEXT_EMBEDDING_MODEL
   );
 
-  const native = getAIProvider() === "openai";
+  const native = getAIProvider() !== "openrouter";
   const openRouterEmbedding = native
     ? null
     : createOpenRouterEmbeddingModel(configuredModel);

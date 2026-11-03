@@ -35,4 +35,4 @@ Public WorkOS signup is disabled for this installation. Use the existing complim
 
 Both hostnames are excluded from indexing by a Cloudflare response-header rule. The demo uses synthetic data and restricts iframe embedding to the main app's origin.
 
-`PAUSE_AUTONOMOUS_JOBS=true` pauses recurring background jobs during setup. It does not block every user-initiated operation. Review provider balances and targeting before enabling recurring discovery. X research uses SocialAPI; X posting/messaging requires separate developer credentials and is not configured for this installation.
+`PAUSE_AUTONOMOUS_JOBS=true` pauses recurring background jobs during setup. It does not block every user-initiated operation. Review provider balances and targeting before enabling recurring discovery. X research uses SocialAPI; X posting/messaging uses separately configured developer credentials, account authorization and provider credits.
