@@ -116,6 +116,7 @@ import type * as lib_agentThreadContextCore from "../lib/agentThreadContextCore.
 import type * as lib_agentThreadTargetSelectionHelpers from "../lib/agentThreadTargetSelectionHelpers.js";
 import type * as lib_aggregateMigrationHelpers from "../lib/aggregateMigrationHelpers.js";
 import type * as lib_ai from "../lib/ai.js";
+import type * as lib_aiProvider from "../lib/aiProvider.js";
 import type * as lib_analyticsCore from "../lib/analyticsCore.js";
 import type * as lib_autoPlanCore from "../lib/autoPlanCore.js";
 import type * as lib_autoPlanGroundingCacheCore from "../lib/autoPlanGroundingCacheCore.js";
@@ -522,6 +523,7 @@ declare const fullApi: ApiFromModules<{
   "lib/agentThreadTargetSelectionHelpers": typeof lib_agentThreadTargetSelectionHelpers;
   "lib/aggregateMigrationHelpers": typeof lib_aggregateMigrationHelpers;
   "lib/ai": typeof lib_ai;
+  "lib/aiProvider": typeof lib_aiProvider;
   "lib/analyticsCore": typeof lib_analyticsCore;
   "lib/autoPlanCore": typeof lib_autoPlanCore;
   "lib/autoPlanGroundingCacheCore": typeof lib_autoPlanGroundingCacheCore;

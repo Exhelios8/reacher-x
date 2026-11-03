@@ -1,5 +1,6 @@
 import { isCurrentTargetingLearning } from "./lib/learningTargetingHelpers";
 import { v } from "convex/values";
+import { getAIProvider } from "./lib/aiProvider";
 import type { Doc, Id } from "./_generated/dataModel";
 import type { ActionCtx } from "./_generated/server";
 import { internal } from "./_generated/api";
@@ -1305,7 +1306,7 @@ export const applyMemoryEvaluationPlanInternal = internalMutation({
         threadId: undefined,
         agentName: "Memory Evaluator",
         model: args.model,
-        provider: "openrouter",
+        provider: getAIProvider(),
         usage: sanitizeUsageSnapshotForConvex(args.telemetryUsage),
         providerMetadata: sanitizeProviderMetadataForConvex(
           args.telemetryProviderMetadata

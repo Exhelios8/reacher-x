@@ -37,7 +37,6 @@ async function getCachedGitHubStarsCount(): Promise<number> {
 
   try {
     const response = await fetch(GITHUB_REPO_API_URL, {
-      cache: "force-cache",
       headers: {
         Accept: "application/vnd.github+json",
         "X-GitHub-Api-Version": "2022-11-28",

@@ -5,6 +5,7 @@
 // database access. Callers own state construction and answer interpretation.
 
 import { getConfiguredModel } from "./modelConfigHelpers";
+import { getAIProvider } from "./aiProvider";
 
 const JEV_DECISIONS_ENDPOINT = "https://openrouter.ai/api/alpha/decisions";
 const DEFAULT_JEV_MODEL = "typesafe/jev-1.13";
@@ -199,6 +200,11 @@ function normalizeAnswer(value: unknown): JevAnswer | null {
 export async function callJevDecisions(
   args: JevRequest
 ): Promise<JevCallResult> {
+  if (getAIProvider() === "openai") {
+    throw new Error(
+      "Jev diagnostics are unavailable with AI_PROVIDER=openai; no OpenRouter request was made."
+    );
+  }
   const apiKey = process.env.OPENROUTER_API_KEY?.trim();
   if (!apiKey) {
     throw new JevClientError(

@@ -32,7 +32,8 @@ class OpenGraphCache {
     this.defaultTtl = options.defaultTtl || 60 * 60 * 1000; // 1 hour
     this.cleanupInterval = options.cleanupInterval || 5 * 60 * 1000; // 5 minutes
 
-    this.startCleanupTimer();
+    // Workers forbid module-level timers; server reads already expire entries.
+    if (typeof window !== "undefined") this.startCleanupTimer();
   }
 
   /**

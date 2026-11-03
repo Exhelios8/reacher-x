@@ -1,8 +1,6 @@
 // convex/lib/ai.ts
-// OpenRouter provider setup for Convex actions
-// Docs: https://openrouter.ai/docs
+// Shared model roles and structured generation for Convex actions.
 
-import { createOpenRouter } from "@openrouter/ai-sdk-provider";
 import {
   generateText,
   NoObjectGeneratedError,
@@ -16,7 +14,12 @@ import { env } from "../_generated/server";
 import type { ActionCtx } from "../_generated/server";
 import type { Id } from "../_generated/dataModel";
 import { internal } from "../_generated/api";
-import { getConfiguredModel } from "./modelConfigHelpers";
+import {
+  createAIProvider,
+  getAIProvider,
+  getConfiguredAIModel,
+} from "./aiProvider";
+export { createAIProvider } from "./aiProvider";
 import {
   combineStructuredGenerationErrors,
   getStructuredAttemptProviderOptions,
@@ -29,55 +32,6 @@ import {
 
 export type { OpenRouterProviderOptions } from "./structuredOutputCore";
 export { StructuredGenerationError } from "./structuredOutputCore";
-
-// ============================================================================
-// Provider Factory
-// ============================================================================
-
-/**
- * Creates an OpenRouter provider instance.
- *
- * OpenRouter provides:
- * - Provider routing for speed-focused inference
- * - Model/provider fallbacks
- * - Usage tracking and selected provider metadata
- * - Structured outputs
- *
- * @see https://openrouter.ai/docs/guides/overview/principles
- *
- * @example
- * ```typescript
- * import { generateText } from 'ai';
- * import { createAIProvider, AGENT_PROVIDER_OPTIONS, REASONING_MODEL } from './lib/ai';
- *
- * const provider = createAIProvider();
- * const { text } = await generateText({
- *   model: provider(REASONING_MODEL),
- *   providerOptions: AGENT_PROVIDER_OPTIONS,
- *   prompt: 'Hello!',
- * });
- * ```
- */
-export function createAIProvider() {
-  const apiKey = process.env.OPENROUTER_API_KEY;
-
-  if (!apiKey) {
-    throw new Error(
-      "[AI] Missing OPENROUTER_API_KEY environment variable. " +
-        "Get it from: https://openrouter.ai/settings/keys"
-    );
-  }
-
-  return createOpenRouter({
-    apiKey,
-    // App attribution for OpenRouter analytics
-    // https://openrouter.ai/docs/app-attribution
-    headers: {
-      "HTTP-Referer": "https://reacherx.com",
-      "X-Title": "ReacherX",
-    },
-  });
-}
 
 // ============================================================================
 // Model Identifiers
@@ -300,17 +254,20 @@ function getRoutingPresetConfig(): RoutingPresetConfig {
 
 const activeRoutingConfig = getRoutingPresetConfig();
 
-export const FAST_MODEL = getConfiguredModel(
+export const FAST_MODEL = getConfiguredAIModel(
   "AI_FAST_MODEL",
-  activeRoutingConfig.fast.model
+  activeRoutingConfig.fast.model,
+  "gpt-4.1-mini"
 );
-export const REASONING_MODEL = getConfiguredModel(
+export const REASONING_MODEL = getConfiguredAIModel(
   "AI_REASONING_MODEL",
-  activeRoutingConfig.reasoning.model
+  activeRoutingConfig.reasoning.model,
+  "gpt-4.1"
 );
-export const AUTOCOMPLETE_MODEL = getConfiguredModel(
+export const AUTOCOMPLETE_MODEL = getConfiguredAIModel(
   "AI_AUTOCOMPLETE_MODEL",
-  MODELS.GPT_OSS
+  MODELS.GPT_OSS,
+  "gpt-4.1-mini"
 );
 export const HELPER_MODEL = AUTOCOMPLETE_MODEL;
 
@@ -345,9 +302,10 @@ export const AUTOCOMPLETE_PROVIDER_OPTIONS = HELPER_PROVIDER_OPTIONS;
  * configuration. Keep it on the highest-judgment lane independently of the
  * cost-optimized fast/reasoning preset.
  */
-export const ONBOARDING_MODEL = getConfiguredModel(
+export const ONBOARDING_MODEL = getConfiguredAIModel(
   "AI_ONBOARDING_MODEL",
-  MODELS.GPT_6_LUNA_PRO
+  MODELS.GPT_6_LUNA_PRO,
+  "gpt-4.1"
 );
 
 export const ONBOARDING_PROVIDER_OPTIONS: OpenRouterProviderOptions =
@@ -371,8 +329,9 @@ const ONBOARDING_PROVIDER_LABEL = isPremiumOpenAIChatModel(ONBOARDING_MODEL)
  * Keep this route separate from broader fast/reasoning routing so background
  * generation can still evolve independently.
  */
-export const PINNED_AGENT_MODEL = getConfiguredModel(
+export const PINNED_AGENT_MODEL = getConfiguredAIModel(
   "AI_SETUP_AGENT_MODEL",
+  ONBOARDING_MODEL,
   ONBOARDING_MODEL
 );
 
@@ -388,9 +347,10 @@ export const PINNED_AGENT_PROVIDER_OPTIONS: OpenRouterProviderOptions =
  * following and judgment than setup helpers and simple workspace operations.
  * Keep this route separate so those lower-judgment paths remain cost-efficient.
  */
-export const OUTREACH_AGENT_MODEL = getConfiguredModel(
+export const OUTREACH_AGENT_MODEL = getConfiguredAIModel(
   "AI_MAIN_AGENT_MODEL",
-  MODELS.GPT_6_LUNA_PRO
+  MODELS.GPT_6_LUNA_PRO,
+  "gpt-4.1"
 );
 
 export const OUTREACH_AGENT_PROVIDER_OPTIONS: OpenRouterProviderOptions =
@@ -418,9 +378,10 @@ export const OUTREACH_AGENT_PROMPT_CACHE_OPTIONS = {
  * route. We allow a provider fallback within Kimi's lane, but never a silent
  * downgrade to the default text-only agent model.
  */
-export const PINNED_VISION_MODEL = getConfiguredModel(
+export const PINNED_VISION_MODEL = getConfiguredAIModel(
   "AI_VISION_MODEL",
-  MODELS.KIMI_K2_6
+  MODELS.KIMI_K2_6,
+  "gpt-4.1"
 );
 
 export const PINNED_VISION_PROVIDER_OPTIONS: OpenRouterProviderOptions =
@@ -434,7 +395,7 @@ export const PINNED_VISION_PROVIDER_OPTIONS: OpenRouterProviderOptions =
   });
 
 export function supportsExplicitPromptCaching(model: string): boolean {
-  return isPremiumOpenAIChatModel(model);
+  return getAIProvider() === "openrouter" && isPremiumOpenAIChatModel(model);
 }
 
 export type ModelRouting = RoutingPreset | "onboarding";
@@ -458,6 +419,20 @@ export function getOpenRouterExtraBody(
 }
 
 function getModelForRouting(routing: ModelRouting): RoutingModelConfig {
+  if (getAIProvider() === "openai") {
+    const config =
+      routing === "onboarding"
+        ? {
+            model: ONBOARDING_MODEL,
+            timeoutMs: ONBOARDING_MODEL_TIMEOUT_MS,
+            providerOptions: ONBOARDING_PROVIDER_OPTIONS,
+          }
+        : {
+            ...getRoutingPresetConfig()[routing],
+            model: routing === "fast" ? FAST_MODEL : REASONING_MODEL,
+          };
+    return { ...config, providerLabel: "openai" };
+  }
   if (routing === "onboarding") {
     return {
       model: ONBOARDING_MODEL,
@@ -560,7 +535,9 @@ export function extractUsage(result: {
     totalTokens: usage.totalTokens || 0,
     cost,
     modelSelected: metadata?.model,
-    providerSelected: metadata?.provider,
+    providerSelected:
+      metadata?.provider ??
+      (getAIProvider() === "openai" ? "openai" : undefined),
     cacheReadTokens,
     cacheWriteTokens: usage.inputTokenDetails?.cacheWriteTokens,
     noCacheTokens: usage.inputTokenDetails?.noCacheTokens,
@@ -862,11 +839,17 @@ export async function generateTextWithJsonParse<T>({
 
   for (let attempt = 0; attempt < maxRetries; attempt++) {
     const startTime = getCurrentUTCTimestamp();
-    const attemptRouting = getStructuredAttemptProviderOptions({
-      providerOptions: modelConfig.providerOptions,
-      ignoredProviders: [...ignoredProviders],
-      requireStructuredOutput: nativeStructuredOutput,
-    });
+    const attemptRouting =
+      getAIProvider() === "openai"
+        ? {
+            providerOptions: undefined,
+            configuredProvider: "openai",
+          }
+        : getStructuredAttemptProviderOptions({
+            providerOptions: modelConfig.providerOptions,
+            ignoredProviders: [...ignoredProviders],
+            requireStructuredOutput: nativeStructuredOutput,
+          });
     let resultDiagnostics:
       | Omit<StructuredGenerationAttempt, "errorMessage" | "durationMs">
       | undefined;
@@ -984,7 +967,7 @@ export async function generateTextWithJsonParse<T>({
         });
       }
 
-      if (attemptFailure.providerSelected) {
+      if (getAIProvider() === "openrouter" && attemptFailure.providerSelected) {
         const providerRouting = modelConfig.providerOptions.openrouter.provider;
         const providerSlug = resolveOpenRouterProviderSlug({
           providerName: attemptFailure.providerSelected,

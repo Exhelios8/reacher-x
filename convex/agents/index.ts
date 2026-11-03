@@ -1,12 +1,12 @@
 "use node";
 
 // convex/agents/index.ts
-// Agent definitions using @convex-dev/agent + OpenRouter
+// Agent definitions using @convex-dev/agent and the configured AI provider.
 
 import { Agent } from "@convex-dev/agent";
 import { stepCountIs, wrapLanguageModel } from "ai";
 import { components, internal } from "../_generated/api";
-import { createOpenRouter } from "@openrouter/ai-sdk-provider";
+import { createAIProvider } from "../lib/aiProvider";
 import {
   type OpenRouterProviderOptions,
   OUTREACH_AGENT_MODEL,
@@ -64,40 +64,13 @@ import { webResearch } from "./tools/webResearch";
 // Lazy Model Provider
 // ============================================================================
 
-/**
- * Creates a language model using OpenRouter.
- * The API key is read from environment at runtime.
- *
- * OpenRouter provides:
- * - Access to 400+ models
- * - Auto fallbacks
- * - Provider routing
- * - Tool calling support
- */
-function getOpenRouterProvider() {
-  const apiKey = process.env.OPENROUTER_API_KEY;
-  if (!apiKey) {
-    throw new Error(
-      "[Agent] Missing OPENROUTER_API_KEY environment variable. " +
-        "Get it from: https://openrouter.ai/settings/keys"
-    );
-  }
-  return createOpenRouter({
-    apiKey,
-    headers: {
-      "HTTP-Referer": "https://reacherx.com",
-      "X-Title": "ReacherX",
-    },
-  });
-}
-
-const openrouter = getOpenRouterProvider();
+const provider = createAIProvider();
 function createWorkspaceLanguageModel(
   modelId: string,
   providerOptions: OpenRouterProviderOptions
 ) {
   return wrapLanguageModel({
-    model: openrouter(modelId, {
+    model: provider(modelId, {
       extraBody: getOpenRouterExtraBody(providerOptions),
     }) as any,
     middleware: openRouterMetadataMiddleware,
@@ -105,8 +78,6 @@ function createWorkspaceLanguageModel(
 }
 
 export const workspaceLanguageModel = createWorkspaceLanguageModel(
-  // Pin tool-calling setup runs to the validated Cerebras route. This avoids
-  // provider roulette for multi-step streamed agent turns.
   PINNED_AGENT_MODEL,
   PINNED_AGENT_PROVIDER_OPTIONS
 );

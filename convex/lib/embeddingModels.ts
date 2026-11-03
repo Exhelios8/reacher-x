@@ -6,6 +6,7 @@ import {
   type EmbeddingModelMiddleware,
 } from "ai";
 import { getConfiguredModel } from "./modelConfigHelpers";
+import { getAIProvider, getNativeOpenAIModelId } from "./aiProvider";
 import { logger } from "../../shared/lib/logger";
 
 const DEFAULT_TEXT_EMBEDDING_MODEL = "openai/text-embedding-3-small";
@@ -26,11 +27,11 @@ type EmbeddingModelV3Like = Parameters<
 /**
  * Shared embedding provider selection for agent/RAG vector search.
  *
- * OpenRouter is the primary provider: it exposes a first-class embeddings
+ * In default mode OpenRouter is the primary provider: it exposes embeddings
  * endpoint (https://openrouter.ai/docs/api_reference/embeddings) and bills
  * under the same credits as the chat models. The native OpenAI provider is
  * the automatic failover so a single-provider outage or credit exhaustion
- * cannot break agent turns.
+ * cannot break agent turns. Native OpenAI mode never uses this cross-provider fallback.
  */
 export function getTextEmbeddingModel(): EmbeddingModel {
   const configuredModel = getConfiguredModel(
@@ -38,13 +39,18 @@ export function getTextEmbeddingModel(): EmbeddingModel {
     DEFAULT_TEXT_EMBEDDING_MODEL
   );
 
-  const openRouterEmbedding = createOpenRouterEmbeddingModel(configuredModel);
-  const openAIEmbedding = createOpenAIEmbeddingModel(configuredModel);
+  const native = getAIProvider() === "openai";
+  const openRouterEmbedding = native
+    ? null
+    : createOpenRouterEmbeddingModel(configuredModel);
+  const openAIEmbedding = createOpenAIEmbeddingModel(configuredModel, native);
 
   const primary = openRouterEmbedding ?? openAIEmbedding;
   if (!primary) {
     throw new Error(
-      "[Embeddings] Missing OPENAI_API_KEY and OPENROUTER_API_KEY environment variables."
+      native
+        ? "[Embeddings] Missing OPENAI_API_KEY environment variable."
+        : "[Embeddings] Missing OPENAI_API_KEY and OPENROUTER_API_KEY environment variables."
     );
   }
 
@@ -80,8 +86,15 @@ function createOpenRouterEmbeddingModel(
 }
 
 function createOpenAIEmbeddingModel(
-  configuredModel: string
+  configuredModel: string,
+  native: boolean
 ): EmbeddingModelV3Like | null {
+  if (native) {
+    const modelId = getNativeOpenAIModelId(configuredModel);
+    return process.env.OPENAI_API_KEY?.trim()
+      ? openai.embedding(modelId)
+      : null;
+  }
   if (!process.env.OPENAI_API_KEY || !configuredModel.startsWith("openai/")) {
     return null;
   }

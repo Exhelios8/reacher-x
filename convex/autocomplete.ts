@@ -1,6 +1,7 @@
 "use node";
 
 import { generateText } from "ai";
+import { getAIProvider } from "./lib/aiProvider";
 import { v } from "convex/values";
 import { action } from "./lib/functionBuilders";
 import { components, internal } from "./_generated/api";
@@ -486,7 +487,10 @@ Rules:
         prompt,
         temperature: 0.15,
         maxOutputTokens: INLINE_AUTOCOMPLETE_MAX_OUTPUT_TOKENS,
-        providerOptions: AUTOCOMPLETE_PROVIDER_OPTIONS,
+        providerOptions:
+          getAIProvider() === "openai"
+            ? undefined
+            : AUTOCOMPLETE_PROVIDER_OPTIONS,
         abortSignal: cancellationWatcher.abortSignal,
       });
     } catch (error) {

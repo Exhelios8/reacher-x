@@ -14,6 +14,9 @@ import aggregate from "@convex-dev/aggregate/convex.config";
 
 const app = defineApp({
   env: {
+    AI_PROVIDER: v.optional(
+      v.union(v.literal("openrouter"), v.literal("openai"))
+    ),
     AVAILABLE_PLAN_OFFERS: v.optional(v.string()),
     AI_FAST_MODEL: v.optional(v.string()),
     AI_REASONING_MODEL: v.optional(v.string()),

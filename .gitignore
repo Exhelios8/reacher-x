@@ -64,3 +64,7 @@ next-env.d.ts
 
 # codex / local test artifacts
 .codex-tmp/
+dist/
+.vinext/
+.cloudflare/
+.wrangler/

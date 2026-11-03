@@ -196,24 +196,34 @@ Prefer `UNIPILE_BASE_URL`. The client also accepts `UNIPILE_API_URL` and `UNIPIL
 
 ### Optional Product Services
 
-| Variable                   | Location                  | Purpose                                                                                                          |
-| -------------------------- | ------------------------- | ---------------------------------------------------------------------------------------------------------------- |
-| `OPENAI_API_KEY`           | Convex                    | Preferred native provider when `AI_TEXT_EMBEDDING_MODEL` is an OpenAI model; embeddings otherwise use OpenRouter |
-| `EXA_API_KEY`              | Runtime using the feature | URL extraction and research helpers                                                                              |
-| `BISHOPI_API_KEY`          | Convex                    | Keyword discovery                                                                                                |
-| `GITHUB_TOKEN`             | `.env.local`/hosting      | Higher-rate GitHub metadata requests                                                                             |
-| `NEXT_PUBLIC_POSTHOG_KEY`  | `.env.local`/hosting      | PostHog project key                                                                                              |
-| `NEXT_PUBLIC_POSTHOG_HOST` | `.env.local`/hosting      | PostHog host; defaults to the US endpoint                                                                        |
-| `RESEND_API_KEY`           | Convex                    | Waitlist welcome email only; general application email is not implemented yet                                    |
-| `POLAR_ORGANIZATION_TOKEN` | Convex                    | Polar billing API access                                                                                         |
-| `POLAR_WEBHOOK_SECRET`     | Convex                    | Verifies Polar subscription webhooks at `/polar/events`                                                          |
-| `POLAR_PRODUCT_*`          | Convex                    | Hobby, Base, and Pro monthly/yearly product IDs                                                                  |
-| `POLAR_SERVER`             | Convex                    | `sandbox` by default; use `production` for live billing                                                          |
-| `AVAILABLE_PLAN_OFFERS`    | Convex                    | Enabled plan and billing-period combinations for new purchases; see [Plan Availability](#plan-availability)      |
+| Variable                   | Location                  | Purpose                                                                                                     |
+| -------------------------- | ------------------------- | ----------------------------------------------------------------------------------------------------------- |
+| `OPENAI_API_KEY`           | Convex                    | Required in native OpenAI mode; optional embedding fallback in default OpenRouter mode                      |
+| `EXA_API_KEY`              | Runtime using the feature | URL extraction and research helpers                                                                         |
+| `BISHOPI_API_KEY`          | Convex                    | Keyword discovery                                                                                           |
+| `GITHUB_TOKEN`             | `.env.local`/hosting      | Higher-rate GitHub metadata requests                                                                        |
+| `NEXT_PUBLIC_POSTHOG_KEY`  | `.env.local`/hosting      | PostHog project key                                                                                         |
+| `NEXT_PUBLIC_POSTHOG_HOST` | `.env.local`/hosting      | PostHog host; defaults to the US endpoint                                                                   |
+| `RESEND_API_KEY`           | Convex                    | Waitlist welcome email only; general application email is not implemented yet                               |
+| `POLAR_ORGANIZATION_TOKEN` | Convex                    | Polar billing API access                                                                                    |
+| `POLAR_WEBHOOK_SECRET`     | Convex                    | Verifies Polar subscription webhooks at `/polar/events`                                                     |
+| `POLAR_PRODUCT_*`          | Convex                    | Hobby, Base, and Pro monthly/yearly product IDs                                                             |
+| `POLAR_SERVER`             | Convex                    | `sandbox` by default; use `production` for live billing                                                     |
+| `AVAILABLE_PLAN_OFFERS`    | Convex                    | Enabled plan and billing-period combinations for new purchases; see [Plan Availability](#plan-availability) |
 
 `CONVEX_SITE_URL` is automatically available inside Convex functions and is used for webhook URLs. Override it only when intentionally configuring custom deployment domains.
 
 For billing, register `https://<your-deployment>.convex.site/polar/events` (or the corresponding custom Convex HTTP-action origin) as the Polar webhook endpoint. Set its signing secret as `POLAR_WEBHOOK_SECRET` on that Convex deployment. The organization token, product IDs, and webhook secret must all belong to the environment selected by `POLAR_SERVER`. Subscription events update the application's plan state; checkout alone is not a substitute for working webhooks.
+
+## Native OpenAI For Internal Deployments
+
+Set `AI_PROVIDER=openai` and `OPENAI_API_KEY` on the selected **Convex deployment** to use native OpenAI for core generation, agents, vision, autocomplete, and embeddings. No `OPENROUTER_API_KEY` is needed in this mode, and failures never switch to OpenRouter. The installed AI SDK uses OpenAI Chat Completions for chat models. With `AI_PROVIDER` unset or `openrouter`, existing OpenRouter behavior stays unchanged, including OpenRouter-first embeddings and optional native embedding fallback.
+
+Native defaults are `gpt-4.1-mini` for fast helpers and autocomplete, `gpt-4.1` for reasoning, onboarding, setup/main agents and vision, and `text-embedding-3-small` for embeddings. Override the existing `AI_*_MODEL` variables with a model available to your OpenAI project. Both native IDs and `openai/<native-id>` are accepted; foreign-provider IDs and `gpt-oss` models are rejected before a request. Remove old Kimi/GPT-OSS overrides when switching modes. Model availability and account limits must be checked against the actual OpenAI project; defaults are not a promise of access.
+
+OpenRouter routing presets, plugins, explicit prompt caching and session routing are not sent to OpenAI. Optional Jev evaluation/shadow diagnostics require OpenRouter and explicitly fail if invoked in native mode; leave `JEV_PREFILTER_MODE` unset or `off`. Core qualification does not depend on Jev. Native token/cache usage is preserved, but this application does not receive native USD cost in API metadata: consult OpenAI billing for actual spending. A monthly budget is not enforced by selecting a provider.
+
+These changes select the AI provider only. Existing plan requirements and social data-provider requirements still apply. Reference: [AI SDK OpenAI provider](https://ai-sdk.dev/providers/ai-sdk-providers/openai).
 
 ## Plan Availability
 

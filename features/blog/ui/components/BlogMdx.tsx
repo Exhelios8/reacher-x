@@ -2,9 +2,24 @@ import Image from "next/image";
 import Link from "next/link";
 import { cacheLife } from "next/cache";
 import { isValidElement, type ComponentProps, type ReactNode } from "react";
-import { codeToHtml, bundledLanguages } from "shiki";
+import {
+  bundledLanguages,
+  bundledThemes,
+  createBundledHighlighter,
+  createSingletonShorthands,
+} from "shiki";
+import { createJavaScriptRegexEngine } from "shiki/engine/javascript";
 import { InlineCode } from "@/shared/ui/components/InlineCode";
 import { BlogCopyButton } from "./BlogCopyButton";
+
+// Workers cannot compile the default Oniguruma WASM at request time.
+const { codeToHtml } = createSingletonShorthands(
+  createBundledHighlighter({
+    langs: bundledLanguages,
+    themes: bundledThemes,
+    engine: () => createJavaScriptRegexEngine(),
+  })
+);
 
 export async function BlogPre({ children }: { children?: ReactNode }) {
   if (

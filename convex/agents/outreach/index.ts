@@ -1,11 +1,11 @@
 // convex/agents/outreach/index.ts
-// Outreach Agent definition using @convex-dev/agent + OpenRouter
+// Outreach Agent definition using @convex-dev/agent and the configured AI provider.
 "use node";
 
 import { Agent, type ContextHandler } from "@convex-dev/agent";
 import { wrapLanguageModel } from "ai";
 import { components, internal } from "../../_generated/api";
-import { createOpenRouter } from "@openrouter/ai-sdk-provider";
+import { createAIProvider } from "../../lib/aiProvider";
 import {
   type OpenRouterProviderOptions,
   OUTREACH_AGENT_MODEL,
@@ -112,23 +112,7 @@ export const outreachAgentBaseTools = {
 // Lazy Model Provider
 // ============================================================================
 
-function getOpenRouterProvider() {
-  const apiKey = process.env.OPENROUTER_API_KEY;
-  if (!apiKey) {
-    throw new Error(
-      "[Outreach Agent] Missing OPENROUTER_API_KEY environment variable."
-    );
-  }
-  return createOpenRouter({
-    apiKey,
-    headers: {
-      "HTTP-Referer": "https://reacherx.com",
-      "X-Title": "ReacherX",
-    },
-  });
-}
-
-const openrouter = getOpenRouterProvider();
+const provider = createAIProvider();
 function createOutreachLanguageModel(
   modelId: string,
   providerOptions: OpenRouterProviderOptions,
@@ -138,7 +122,7 @@ function createOutreachLanguageModel(
   }
 ) {
   return wrapLanguageModel({
-    model: openrouter(modelId, {
+    model: provider(modelId, {
       extraBody: {
         ...getOpenRouterExtraBody(providerOptions),
         ...(options?.enableExplicitPromptCaching

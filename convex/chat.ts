@@ -3,6 +3,7 @@
 // Docs: https://docs.convex.dev/agents/streaming
 
 import { v } from "convex/values";
+import { getAIProvider } from "./lib/aiProvider";
 import { getFunctionAddress, paginationOptsValidator } from "convex/server";
 import type { LanguageModel, ModelMessage } from "ai";
 import {
@@ -4098,7 +4099,7 @@ export const resumePlanBatchAgentResponse = internalAction({
           status: "success",
           finishReason: responseFinishReason,
           model: responseModelId,
-          provider: "openrouter",
+          provider: getAIProvider(),
         },
       });
       await ctx.runMutation(
