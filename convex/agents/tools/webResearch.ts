@@ -79,6 +79,14 @@ const webResearchInputSchema = z.union([
     query: z.string().trim().min(2).max(240),
     scope: z.enum(["web", "reacherx"]).default("web"),
     limit: z.number().int().min(1).max(4).default(3),
+    includeDomains: z
+      .array(z.hostname())
+      .min(1)
+      .max(5)
+      .optional()
+      .describe(
+        "Restrict web-scope search to these hostnames, without URLs or paths"
+      ),
   }),
   z.object({
     operation: z.literal("read"),
@@ -164,7 +172,7 @@ export function getWebResearchModelOutput(output: WebResearchResult) {
 
 export const webResearch = createTool({
   description:
-    "Search the web or read a specific URL using bounded excerpts. Use show only for a ReacherX article or interactive demo that informed the answer or that the user explicitly requested.",
+    "Search the web or read a specific URL using bounded excerpts. Set includeDomains to restrict web searches to Reddit, Threads, LinkedIn or other sites using bare hostnames. Use show only for a ReacherX article or interactive demo that informed the answer or that the user explicitly requested.",
   inputSchema: webResearchInputSchema,
   execute: async (ctx, input): Promise<WebResearchResult> => {
     const providerContext = getProviderContext(ctx);
@@ -180,6 +188,7 @@ export const webResearch = createTool({
             : await searchWeb(input.query, providerContext, {
                 maxResults: input.limit,
                 maxCharacters: 1200,
+                includeDomains: input.includeDomains,
               });
 
         return {

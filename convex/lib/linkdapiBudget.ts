@@ -19,15 +19,17 @@ export async function acquireLinkdApiBudget(
   consumer: string,
   requestContext?: Omit<ProviderRequestContext, "consumer" | "endpoint">
 ) {
-  await assertProviderRequestAllowed(ctx, "linkdapi", {
-    consumer,
-    endpoint: consumer,
-    ...requestContext,
-  });
-  return await ctx.runAction(
+  const reservation = await ctx.runAction(
     internalLinkdApiBudget.acquireLinkdApiBudgetInternal,
     {
       consumer,
     }
   );
+  // Claim a probe only when ready to send; the circuit can change while queued.
+  await assertProviderRequestAllowed(ctx, "linkdapi", {
+    consumer,
+    endpoint: consumer,
+    ...requestContext,
+  });
+  return reservation;
 }
