@@ -26,6 +26,54 @@ async function seedWorkspace(t: ReturnType<typeof convexTest>) {
 }
 
 describe("prospect persistence reliability", () => {
+  test.each(["omit", "clear"] as const)(
+    "%s finance distinguishes partial updates from a complete extraction with no finance",
+    async (operation) => {
+      const t = convexTest(schema, modules);
+      const workspace = await seedWorkspace(t);
+      const finance = {
+        displayValue: "Previous financial data",
+        amount: 1_000,
+        currency: "EUR",
+        evidencePosts: [],
+      };
+      const prospectId = await t.run((ctx) =>
+        ctx.db.insert("prospects", {
+          ...workspace,
+          platform: "linkedin",
+          origin: "manual",
+          externalId: "enrichment-finance",
+          data: {},
+          status: "new",
+          qualificationStatus: "qualified",
+          qualificationScore: 86,
+          enrichmentStatus: "enriched",
+          finance,
+          updatedAt: 1,
+        })
+      );
+
+      const result = await t.mutation(
+        internal.prospects.updateProspectEnrichment,
+        {
+          prospectId,
+          title: "Updated role",
+          enrichmentStatus: "enriched",
+          ...(operation === "clear" ? { finance: null } : {}),
+        }
+      );
+      const saved = await t.run((ctx) => ctx.db.get(prospectId));
+
+      expect(result).toEqual({ success: true, skipped: false });
+      expect(saved?.title).toBe("Updated role");
+      expect(saved?.finance).toEqual(
+        operation === "clear" ? undefined : finance
+      );
+      if (operation === "clear") expect(saved).not.toHaveProperty("finance");
+    },
+    15_000
+  );
+
   test("skips unchanged summary and rollup writes during provider refreshes", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(Date.UTC(2026, 7, 29, 8));

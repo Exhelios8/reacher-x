@@ -9,6 +9,14 @@ import schema from "./schema";
 
 const modules = import.meta.glob("./**/*.ts");
 
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((resolvePromise) => {
+    resolve = resolvePromise;
+  });
+  return { promise, resolve };
+}
+
 afterEach(() => {
   vi.useRealTimers();
   vi.unstubAllEnvs();
@@ -87,8 +95,8 @@ describe("provider circuit write contention", () => {
 describe("LinkdAPI circuit permission after pacing", () => {
   test("blocks a queued request when an earlier request opens the circuit", async () => {
     const t = convexTest(schema, modules);
-    const waiting = Promise.withResolvers<void>();
-    const slot = Promise.withResolvers<{ waitMs: number }>();
+    const waiting = deferred<void>();
+    const slot = deferred<{ waitMs: number }>();
     const ctx = {
       runMutation: t.mutation,
       runAction: async () => {
@@ -133,8 +141,8 @@ describe("LinkdAPI circuit permission after pacing", () => {
         updatedAt: 10_000,
       })
     );
-    const waiting = Promise.withResolvers<void>();
-    const slot = Promise.withResolvers<{ waitMs: number }>();
+    const waiting = deferred<void>();
+    const slot = deferred<{ waitMs: number }>();
     const ctx = {
       runMutation: t.mutation,
       runAction: async () => {

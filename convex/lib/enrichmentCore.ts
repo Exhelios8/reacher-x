@@ -30,6 +30,7 @@ import {
 } from "./workflowSafeProspect";
 import { discoverPublicContactInfo } from "./contactDiscoveryCore";
 import { hydrateTwitterProfileLinkMetadata } from "./twitterProfileLinkResolver";
+import { getNestedRecord, getStringProperty } from "./typeGuards";
 
 const enrichmentLogger = logger.withScope("EnrichmentCore");
 
@@ -209,6 +210,17 @@ const unifiedEnrichmentSchema = z.object({
     found: z
       .boolean()
       .describe("Whether any finance/revenue information was found"),
+    attribution: z
+      .enum([
+        "own_actual",
+        "acquisition_target",
+        "client_or_third_party",
+        "target_or_budget",
+        "unknown",
+      ])
+      .describe(
+        "Who the financial information concerns. own_actual requires an actual result of this prospect or their current company; acquisition criteria, client results, goals and budgets are excluded."
+      ),
     displayValue: z
       .string()
       .optional()
@@ -245,7 +257,7 @@ Your task is to analyze the profile data and posts to extract:
 3. **Company**: Company affiliation (for individuals only)
 4. **Website**: Website URL from bio (not social media links)
 5. **Pain Points**: Specific challenges or problems mentioned, with solutions if they match the user's ICP
-6. **Finance**: Any MRR, ARR, revenue, profit, or funding mentions
+6. **Finance**: Actual MRR, ARR, revenue, profit, or funding attributed to this prospect or their current company
 
 PAIN POINT MATCHING RULES:
 - Extract pain points from the posts
@@ -255,6 +267,11 @@ PAIN POINT MATCHING RULES:
 
 FINANCE EXTRACTION RULES:
 - Only extract if explicitly mentioned (don't guess)
+- Classify attribution before extracting. Use own_actual only for an actual financial result of this prospect or their current company.
+- Acquisition candidates being sought are acquisition_target; client/third-party results are client_or_third_party; goals, forecasts, desired ranges and spending budgets are target_or_budget. Ambiguous ownership is unknown.
+- "Looking for B2B SaaS with $1-5M ARR" describes acquisition criteria, not the prospect's current company revenue: attribution=acquisition_target.
+- "Our company reached $1.2M ARR" is an own_actual result when the company is clearly the prospect's current company.
+- If no actual own financial result is supported, do not describe another entity's finances as this prospect's. When none is mentioned, set found=false and attribution=unknown.
 - Format nicely: "$9K MRR", "$1.2M ARR", "Raised $5M Series A"
 - Include the post IDs where it was mentioned`;
 
@@ -343,7 +360,10 @@ Analyze and extract all enrichment data.`;
       company: object.company,
       websiteUrl: object.websiteUrl,
       painPoints: object.painPoints,
-      finance: object.finance.found ? object.finance : undefined,
+      finance:
+        object.finance.found && object.finance.attribution === "own_actual"
+          ? object.finance
+          : undefined,
     };
   } catch (error) {
     enrichmentLogger.error("extractAllEnrichmentData LLM failed", {
@@ -391,6 +411,12 @@ function buildProfileSummary(
     if (profileData.description)
       parts.push(`Description: ${profileData.description}`);
     if (profileData.website) parts.push(`Website: ${profileData.website}`);
+    const employerEvidence = getNestedRecord(profileData, "employerEvidence");
+    if (employerEvidence) {
+      parts.push(
+        `Current employer evidence (company context, not prospect-authored statements):\n${JSON.stringify(employerEvidence)}`
+      );
+    }
   }
 
   return parts.join("\n") || "No profile data available.";
@@ -704,6 +730,14 @@ export async function enrichLinkedInProfile(params: {
           websiteUrl = websites[0].url;
         }
       }
+      const employerCompany = getNestedRecord(
+        getNestedRecord(profile, "employerEvidence"),
+        "company"
+      );
+      websiteUrl =
+        normalizeHttpUrl(websiteUrl ?? "") ??
+        normalizeHttpUrl(getStringProperty(profile, "website") ?? "") ??
+        normalizeHttpUrl(getStringProperty(employerCompany, "website") ?? "");
     }
 
     const profileUrl =

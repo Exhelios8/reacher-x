@@ -98,6 +98,7 @@ import {
   sanitizeProspectEvidencePostsForWorkflow,
   sanitizeWorkflowValue,
 } from "./lib/workflowSafeProspect";
+import { getNestedRecord, getStringProperty } from "./lib/typeGuards";
 import {
   buildSetupPreviewCapacityResetPatch,
   canWriteSetupPreviewProspectBatch,
@@ -778,6 +779,15 @@ export const getProspectWorkflowDataInternal = internalQuery({
       return null;
     }
 
+    const qualificationProfile = getNestedRecord(
+      prospect,
+      "qualificationProfileData"
+    );
+    const employerEvidence = getNestedRecord(
+      qualificationProfile,
+      "employerEvidence"
+    );
+
     return sanitizeWorkflowValue({
       _id: prospect._id,
       _creationTime: prospect._creationTime,
@@ -793,6 +803,17 @@ export const getProspectWorkflowDataInternal = internalQuery({
       status: prospect.status,
       qualificationStatus: prospect.qualificationStatus,
       qualificationScore: prospect.qualificationScore,
+      // Keep the verified employer context separate from social profile text.
+      // The collector bounds this evidence; avoid copying the full cached profile.
+      qualificationProfileData:
+        prospect.platform === "linkedin" && employerEvidence
+          ? {
+              urn: getStringProperty(qualificationProfile, "urn"),
+              id: getStringProperty(qualificationProfile, "id"),
+              username: getStringProperty(qualificationProfile, "username"),
+              employerEvidence,
+            }
+          : undefined,
       enrichmentStatus: prospect.enrichmentStatus,
       matchedKeywords: prospect.matchedKeywords,
       discoveryContext: prospect.discoveryContext,
@@ -2247,13 +2268,16 @@ export const updateProspectEnrichment = internalMutation({
     location: v.optional(v.string()),
     pipelineStage: v.optional(prospectStatusValidator),
     finance: v.optional(
-      v.object({
-        displayValue: v.string(),
-        type: v.optional(v.string()),
-        amount: v.optional(v.number()),
-        currency: v.optional(v.string()),
-        evidencePosts: v.array(v.any()),
-      })
+      v.union(
+        v.object({
+          displayValue: v.string(),
+          type: v.optional(v.string()),
+          amount: v.optional(v.number()),
+          currency: v.optional(v.string()),
+          evidencePosts: v.array(v.any()),
+        }),
+        v.null()
+      )
     ),
     painPoints: v.optional(
       v.array(
@@ -2327,7 +2351,8 @@ export const updateProspectEnrichment = internalMutation({
     if (args.location !== undefined) updateData.location = args.location;
     if (args.pipelineStage !== undefined)
       updateData.pipelineStage = args.pipelineStage;
-    if (args.finance !== undefined) updateData.finance = args.finance;
+    if (args.finance !== undefined)
+      updateData.finance = args.finance ?? undefined;
     if (args.painPoints !== undefined) updateData.painPoints = args.painPoints;
     if (args.evidencePosts !== undefined)
       updateData.evidencePosts = args.evidencePosts;

@@ -31,7 +31,11 @@ import {
   enrichmentStatusValidator,
   prospectPlatformValidator,
 } from "../validators";
-import { getNestedRecord, getStringProperty } from "../lib/typeGuards";
+import {
+  getNestedRecord,
+  getStringProperty,
+  isRecord,
+} from "../lib/typeGuards";
 import { isWorkspaceAutomationActive } from "../lib/workspaceSystem";
 import {
   sanitizeLinkedInCompanyDataForWorkflow,
@@ -128,6 +132,71 @@ type PreparedEnrichmentResult = {
   result: EnrichmentResult;
   evidencePosts: EvidencePost[];
 };
+
+function linkedInCompanyId(value: unknown): string | undefined {
+  const id =
+    typeof value === "number" || typeof value === "string"
+      ? String(value).trim()
+      : "";
+  return /^[1-9]\d*$/.test(id) ? id : undefined;
+}
+
+/** Reuse employer facts only for the same verified person and current employer. */
+function matchingQualificationEmployerEvidence(
+  prospect: Record<string, unknown>,
+  profile: Record<string, unknown>
+): Record<string, unknown> | undefined {
+  const cachedProfile = getNestedRecord(prospect, "qualificationProfileData");
+  const employer = getNestedRecord(cachedProfile, "employerEvidence");
+  if (!employer) return undefined;
+  const identifiers = resolveLinkedInProspectProfileIdentifiers(prospect);
+  const profileUrn = normalizeLinkedInProfileQueryUrn(
+    getStringProperty(profile, "urn") ?? getStringProperty(profile, "id")
+  );
+  const cachedUrn = normalizeLinkedInProfileQueryUrn(
+    getStringProperty(cachedProfile, "urn") ??
+      getStringProperty(cachedProfile, "id")
+  );
+  const username = getStringProperty(profile, "username");
+  const cachedUsername = getStringProperty(cachedProfile, "username");
+  const relationship = getStringProperty(employer, "relationshipSourceUrl");
+  const relationshipUsername = relationship?.match(
+    /^https:\/\/(?:www\.)?linkedin\.com\/in\/([^/?#]+)\/?(?:[?#].*)?$/i
+  )?.[1];
+  if (
+    !profileUrn ||
+    profileUrn !== cachedUrn ||
+    (identifiers.profileUrn
+      ? profileUrn !== identifiers.profileUrn
+      : !identifiers.username ||
+        username?.toLowerCase() !== identifiers.username.toLowerCase()) ||
+    !cachedUsername ||
+    relationshipUsername?.toLowerCase() !==
+      encodeURIComponent(cachedUsername).toLowerCase() ||
+    [profile.linkedinUrl, profile.url].some(
+      (url) => typeof url === "string" && url.includes("/company/")
+    )
+  )
+    return undefined;
+
+  // Prefer the provider's currentPositions over historical/open-ended roles.
+  const currentCompanies = Array.isArray(profile.currentPositions)
+    ? profile.currentPositions.map((position) =>
+        linkedInCompanyId(getNestedRecord(position, "company")?.id)
+      )
+    : (Array.isArray(profile.position) ? profile.position : [])
+        .filter(isRecord)
+        .filter((position) => {
+          const endYear = getNestedRecord(position, "end")?.year;
+          return endYear === 0 || (position.isCurrent === true && !endYear);
+        })
+        .map((position) => linkedInCompanyId(position.companyId));
+  const companyIds = new Set(currentCompanies);
+  const employerId = linkedInCompanyId(employer.companyId);
+  return employerId && companyIds.size === 1 && companyIds.has(employerId)
+    ? employer
+    : undefined;
+}
 
 // ============================================================================
 // Enrichment Core Actions (Node.js runtime)
@@ -487,7 +556,9 @@ export const enrichmentWorkflow = workflow.define({
                 })
               ),
             }
-          : undefined,
+          : enrichmentResult.enrichmentStatus === "failed"
+            ? undefined
+            : null,
         evidencePosts: preparedResult.evidencePosts.map(
           (post: EvidencePost) => {
             if (post.raw && typeof post.raw === "object") {
@@ -1021,6 +1092,13 @@ async function enrichLinkedInProspect(
   // Determine profile to use
   const profile =
     sanitizedProfile ?? sanitizeLinkedInProfileForWorkflow(prospectData);
+  const employerEvidence = matchingQualificationEmployerEvidence(
+    prospect,
+    profileResult.success && isRecord(profileResult.profile)
+      ? profileResult.profile
+      : prospectData
+  );
+  if (employerEvidence) profile.employerEvidence = employerEvidence;
 
   // Call enrichment via step.runAction for Node.js runtime (process.env support)
   const workflowSafeEvidence = toWorkflowSafeEvidencePosts(allPosts);
