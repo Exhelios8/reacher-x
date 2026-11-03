@@ -10,6 +10,7 @@ import { X_CORE_SCOPES } from "./lib/xScopes";
 import { getPlanReadiness } from "./lib/outreachReadinessCore";
 import { getCurrentUTCTimestamp } from "../shared/lib/utils/time/timeUtils";
 import { createOutreachPlan } from "./lib/outreachCore";
+import { toStoredXConnectionStatus } from "./lib/xConnectionStateCore";
 
 const modules = import.meta.glob("./**/*.ts");
 const workflowModules = import.meta.glob(
@@ -137,9 +138,90 @@ async function setup(platform: "twitter" | "linkedin", connected = false) {
 }
 
 afterEach(() => {
+  vi.unstubAllEnvs();
   vi.clearAllTimers();
   vi.useRealTimers();
 });
+
+test("an X account that never connected does not require reconnecting", () => {
+  expect(toStoredXConnectionStatus(null)).toEqual({
+    isConnected: false,
+    status: "disconnected",
+    missingScopes: [],
+  });
+});
+
+test("refreshing an unconnected X account dismisses a stale reconnect warning", async () => {
+  const { t, owner, userId, workspaceId } = await setup("twitter");
+  const notificationId = await t.mutation(
+    internal.outreach.syncAccountHealthNotification,
+    {
+      userId,
+      workspaceId,
+      platform: "twitter",
+      shouldNotify: true,
+      title: "Reconnect X/Twitter account",
+      message: "Stale reconnect warning",
+    }
+  );
+  expect(notificationId).not.toBeNull();
+  const status = await owner.action(api.x.getTwitterConnectionStatus, {});
+  expect(status).toMatchObject({ status: "disconnected", missingScopes: [] });
+  expect(await t.run((ctx) => ctx.db.get(notificationId!))).toMatchObject({
+    status: "dismissed",
+  });
+}, 15_000);
+
+test("refreshing an existing X account with missing permissions keeps its reconnect warning", async () => {
+  const { t, owner, xAccountId } = await setup("twitter", true);
+  await t.run((ctx) =>
+    ctx.db.patch(xAccountId!, { grantedScopes: ["users.read"] })
+  );
+  const status = await owner.action(api.x.getTwitterConnectionStatus, {});
+  expect(status).toMatchObject({
+    status: "reconnect_required",
+    isConnected: false,
+  });
+  expect(status.missingScopes).toContain("tweet.write");
+  expect(
+    await t.run((ctx) => ctx.db.query("outreachNotifications").collect())
+  ).toEqual([
+    expect.objectContaining({
+      status: "pending",
+      contextPlatform: "twitter",
+      title: "Reconnect X/Twitter account",
+    }),
+  ]);
+});
+
+test.each([
+  ["", "", false],
+  ["client-id", "", false],
+  ["client-id", "client-secret", true],
+])(
+  "X connection availability requires both credentials",
+  async (id, secret, configured) => {
+    vi.stubEnv("X_API_CLIENT_ID", id);
+    vi.stubEnv("X_API_CLIENT_SECRET", secret);
+    const { owner } = await setup("twitter");
+    const snapshot = await owner.query(
+      api.connectedAccounts.getConnectionSnapshot,
+      {
+        platform: "twitter",
+      }
+    );
+    expect(snapshot).toMatchObject({
+      isConnected: false,
+      connectionConfigured: configured,
+    });
+    expect(snapshot).not.toHaveProperty("clientSecret");
+    if (!configured) {
+      await expect(
+        owner.action(api.x.getTwitterConnectLink, {})
+      ).rejects.toThrow("X/Twitter account connection is not enabled.");
+    }
+  }
+);
 
 for (const platform of ["twitter", "linkedin"] as const) {
   describe(`${platform} account readiness`, () => {

@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useAction } from "convex/react";
+import { ConvexError } from "convex/values";
 import { useQueryWithStatus } from "@/shared/hooks/useQueryWithStatus";
 import { parseAsString, useQueryStates } from "nuqs";
 import { api } from "@/convex/_generated/api";
@@ -12,6 +13,7 @@ import { clearXChatBrowserData } from "@/features/agent/lib/xChatBrowserSession"
 
 export type TwitterConnectionStatus = {
   isConnected: boolean;
+  connectionConfigured?: boolean;
   status?: "connected" | "expired" | "reconnect_required" | "disconnected";
   connectedAccountId?: string;
   screenName?: string;
@@ -274,7 +276,10 @@ export function useXAccountConnection({
     } catch (err) {
       logger.error("Failed to start X connect:", err);
       toast.error("Unable to start X/Twitter connection", {
-        description: err instanceof Error ? err.message : "Please try again.",
+        description:
+          err instanceof ConvexError && typeof err.data === "string"
+            ? err.data
+            : "Please try again later.",
       });
       setIsMutating(false);
     }

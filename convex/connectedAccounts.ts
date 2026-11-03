@@ -6,7 +6,10 @@ import {
   accountConnectionSnapshotValidator,
   prospectPlatformValidator,
 } from "./validators";
-import { toStoredXConnectionStatus } from "./lib/xConnectionStateCore";
+import {
+  isXConnectionConfigured,
+  toStoredXConnectionStatus,
+} from "./lib/xConnectionStateCore";
 import { toConnectionStatus } from "./lib/linkedinConnectionStateCore";
 
 export const getConnectionSnapshot = query({
@@ -70,6 +73,7 @@ export const getConnectionSnapshot = query({
       : {
           ...snapshot,
           platform,
+          connectionConfigured: isXConnectionConfigured(),
           status: toStoredXConnectionStatus(twitter).status,
         };
   },

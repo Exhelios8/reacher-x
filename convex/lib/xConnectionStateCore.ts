@@ -40,11 +40,18 @@ export function getMissingXScopes(grantedScopes: string[]): string[] {
   return [...X_CORE_SCOPES].filter((scope) => !granted.has(scope));
 }
 
+export function isXConnectionConfigured(): boolean {
+  return Boolean(
+    process.env.X_API_CLIENT_ID?.trim() &&
+    process.env.X_API_CLIENT_SECRET?.trim()
+  );
+}
+
 export function buildDisconnectedXConnectionStatus(): XConnectionStatus {
   return {
     isConnected: false,
     status: "disconnected",
-    missingScopes: [...X_CORE_SCOPES],
+    missingScopes: [],
   };
 }
 

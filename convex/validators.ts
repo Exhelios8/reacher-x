@@ -3181,6 +3181,7 @@ export const accountConnectionSnapshotValidator = v.union(
     ...accountConnectionSnapshotFields,
     platform: v.literal("twitter"),
     status: xAccountStatusValidator,
+    connectionConfigured: v.optional(v.boolean()),
   }),
   v.object({
     ...accountConnectionSnapshotFields,

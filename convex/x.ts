@@ -1,6 +1,7 @@
 "use node";
 
 import { ConvexError, v, type Infer } from "convex/values";
+import { isXConnectionConfigured } from "./lib/xConnectionStateCore";
 import { action, internalAction } from "./lib/functionBuilders";
 import { api, components, internal } from "./_generated/api";
 import type { Id } from "./_generated/dataModel";
@@ -1611,6 +1612,9 @@ export const getTwitterConnectLink = action({
     redirectUrl: string;
   }> => {
     const userId = await getCurrentUserId(ctx);
+    if (!isXConnectionConfigured()) {
+      throw new ConvexError("X/Twitter account connection is not enabled.");
+    }
     return await beginXAuthorizationForUser(ctx, getXStoreRefs(), {
       userId,
       redirectUri: args.callbackUrl,

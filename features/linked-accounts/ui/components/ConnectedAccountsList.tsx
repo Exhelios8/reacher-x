@@ -52,6 +52,7 @@ export function ConnectedAccountsList({
     : "@Connect";
 
   const xIsFullyConnected = Boolean(xStatus?.isConnected);
+  const xConnectionUnavailable = xStatus?.connectionConfigured === false;
   const xNeedsReconnect =
     Boolean(xStatus) &&
     !xIsFullyConnected &&
@@ -103,7 +104,11 @@ export function ConnectedAccountsList({
       <li className="list-none">
         <LinkedAccountRow
           provider="twitter"
-          accountHandle={xHandle}
+          accountHandle={
+            xConnectionUnavailable && !xIsFullyConnected
+              ? "Posting and messaging unavailable"
+              : xHandle
+          }
           accountMeta={
             xStyleIssueMessage ? (
               <p className="text-xs leading-4 break-words text-amber-600">
@@ -134,6 +139,13 @@ export function ConnectedAccountsList({
                     </Button>
                   ) : null}
                 </>
+              );
+            }
+            if (xConnectionUnavailable) {
+              return (
+                <span className="text-muted-foreground shrink-0 text-xs">
+                  Not enabled
+                </span>
               );
             }
             if (xNeedsReconnect) {
