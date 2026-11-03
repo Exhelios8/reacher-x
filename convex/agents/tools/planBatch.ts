@@ -109,7 +109,8 @@ export const listProspectPlans = createTool({
   },
 });
 
-const scopeSchema = z.discriminatedUnion("kind", [
+// Plain unions emit anyOf, supported by native OpenAI; literal tags still validate each branch.
+const scopeSchema = z.union([
   z.object({ kind: z.literal("tagged") }),
   z.object({
     kind: z.literal("plan_group"),
@@ -138,7 +139,7 @@ const scopeSchema = z.discriminatedUnion("kind", [
   }),
 ]);
 
-const managePlanBatchInputSchema = z.discriminatedUnion("action", [
+const managePlanBatchInputSchema = z.union([
   z.object({
     action: z.literal("start"),
     operation: z.enum(["create", "update", "create_or_update"]),

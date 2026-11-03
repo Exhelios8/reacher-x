@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
-import { generateText, stepCountIs, streamText } from "ai";
+import { asSchema, generateText, stepCountIs, streamText } from "ai";
 import { z } from "zod";
 import { MODEL_ENVIRONMENT_KEYS } from "./modelConfigHelpers";
 import {
@@ -371,3 +371,74 @@ test("Pro streaming passes through current outreach middleware using Responses e
     reasoning: { mode: "pro", effort: "medium" },
   });
 });
+
+test.each(["gpt-4.1", "gpt-6-luna"])(
+  "%s accepts the complete main-agent tool catalog and preserves batch validation",
+  async (modelId) => {
+    const { mainAgent } = await import("../agents/index");
+    const mainTools = mainAgent.options.tools;
+    if (!mainTools) throw new Error("Main agent tools are required");
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+        const body = JSON.parse(String(init?.body));
+        for (const tool of body.tools) {
+          const parameters = (tool.function ?? tool).parameters;
+          expect(parameters.type).toBe("object");
+          expect(parameters).not.toHaveProperty("anyOf");
+          expect(JSON.stringify(parameters)).not.toContain('"oneOf":');
+        }
+        return new Response(
+          JSON.stringify(
+            modelId === "gpt-6-luna"
+              ? responseFixture()
+              : {
+                  id: "chat_local",
+                  object: "chat.completion",
+                  created: 1,
+                  model: modelId,
+                  choices: [
+                    {
+                      index: 0,
+                      message: { role: "assistant", content: "Ready" },
+                      finish_reason: "stop",
+                    },
+                  ],
+                }
+          ),
+          { headers: { "content-type": "application/json" } }
+        );
+      })
+    );
+    const tools = Object.fromEntries(
+      Object.entries(mainTools).map(([name, { description, inputSchema }]) => [
+        name,
+        { description, inputSchema },
+      ])
+    );
+    const result = await generateText({
+      model: createAIProvider()(modelId),
+      tools,
+      toolChoice: "none",
+      prompt: "Schema validation only",
+      maxRetries: 0,
+    });
+    expect(result.text).toBe("Ready");
+    const batchSchema = asSchema(mainTools.managePlanBatch.inputSchema);
+    expect(
+      await batchSchema.validate?.({
+        action: "start",
+        operation: "create",
+        scope: { kind: "tagged" },
+      })
+    ).toMatchObject({ success: true });
+    for (const invalid of [
+      { action: "start" },
+      { action: "start", operation: "create", scope: { kind: "plan_group" } },
+      { action: "unknown" },
+    ])
+      expect(await batchSchema.validate?.(invalid)).toMatchObject({
+        success: false,
+      });
+  }
+);
