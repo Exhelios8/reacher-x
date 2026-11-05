@@ -101,6 +101,7 @@ import type * as jevPrefilterShadow from "../jevPrefilterShadow.js";
 import type * as jevPrefilterStore from "../jevPrefilterStore.js";
 import type * as keywords from "../keywords.js";
 import type * as lib_accessHelpers from "../lib/accessHelpers.js";
+import type * as lib_accountFirstDiscoveryCore from "../lib/accountFirstDiscoveryCore.js";
 import type * as lib_adaptiveOutreachCore from "../lib/adaptiveOutreachCore.js";
 import type * as lib_agentAttachmentReferenceCore from "../lib/agentAttachmentReferenceCore.js";
 import type * as lib_agentContextHelpers from "../lib/agentContextHelpers.js";
@@ -508,6 +509,7 @@ declare const fullApi: ApiFromModules<{
   jevPrefilterStore: typeof jevPrefilterStore;
   keywords: typeof keywords;
   "lib/accessHelpers": typeof lib_accessHelpers;
+  "lib/accountFirstDiscoveryCore": typeof lib_accountFirstDiscoveryCore;
   "lib/adaptiveOutreachCore": typeof lib_adaptiveOutreachCore;
   "lib/agentAttachmentReferenceCore": typeof lib_agentAttachmentReferenceCore;
   "lib/agentContextHelpers": typeof lib_agentContextHelpers;
