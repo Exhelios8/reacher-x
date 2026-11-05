@@ -15,6 +15,8 @@ import { createStableHash } from "./memoryHelpers";
 
 export const MAX_EMPLOYER_EVENTS = 2;
 export const EMPLOYER_EVENT_MAX_AGE_MS = 90 * 24 * 60 * 60 * 1000;
+export const MAX_OBSERVED_SITE_PROBLEMS = 1;
+export const OBSERVED_SITE_PROBLEM_MAX_AGE_MS = 14 * 24 * 60 * 60 * 1000;
 
 export function sameQualificationWebsiteHost(
   first: unknown,
@@ -113,14 +115,24 @@ export type QualificationCandidate = {
     | "social_content"
     | "external_article"
     | "profile"
-    | "employer_event";
+    | "employer_event"
+    | "observed_site_problem";
   platform: "twitter" | "linkedin";
-  contentType: "post" | "reply" | "quote_post" | "profile" | "employer_event";
+  contentType:
+    | "post"
+    | "reply"
+    | "quote_post"
+    | "profile"
+    | "employer_event"
+    | "observed_site_problem";
   sourceId: string;
   sourceUrl: string;
   evidenceUrl?: string;
   authorId: string;
   employerName?: string;
+  companyId?: string;
+  observedAt?: string;
+  httpStatus?: 404 | 410;
   text: string;
   publishedAt?: string;
   discoveryQueries: string[];
@@ -145,6 +157,7 @@ export function hasVerifiedGoalConflict(
     (candidate) =>
       candidate.candidateId === assessment.candidateId &&
       candidate.evidenceKind !== "employer_event" &&
+      candidate.evidenceKind !== "observed_site_problem" &&
       candidate.text.includes(assessment.conflictingQuote.trim())
   );
 }
@@ -172,14 +185,26 @@ function prepareEmployerEventCandidates(args: {
     !isRecord(employer.company) ||
     typeof employer.companyId !== "string" ||
     !/^[1-9]\d*$/.test(employer.companyId) ||
-    !Array.isArray(employer.events)
+    (!Array.isArray(employer.events) && !Array.isArray(employer.siteProblems))
   )
     return [];
   const employerName = getString(employer.company.name);
   const company = employer.company;
+  const companyId = employer.companyId;
   if (!employerName) return [];
   const seen = new Set<string>();
-  return employer.events.flatMap((event): QualificationCandidate[] => {
+  let eventCount = 0;
+  let observationCount = 0;
+  const records = [
+    ...(Array.isArray(employer.events) ? employer.events : []).map((event) => ({
+      kind: "employer_event" as const,
+      event,
+    })),
+    ...(Array.isArray(employer.siteProblems) ? employer.siteProblems : []).map(
+      (event) => ({ kind: "observed_site_problem" as const, event })
+    ),
+  ];
+  return records.flatMap(({ kind, event }): QualificationCandidate[] => {
     if (
       !isRecord(event) ||
       event.companyId !== employer.companyId ||
@@ -187,39 +212,76 @@ function prepareEmployerEventCandidates(args: {
       !sameQualificationWebsiteHost(event.finalUrl, company.website) ||
       typeof event.text !== "string" ||
       !event.text.trim() ||
-      typeof event.publishedAt !== "string"
+      (kind === "employer_event"
+        ? typeof event.publishedAt !== "string"
+        : event.evidenceKind !== "observed_site_problem" ||
+          typeof event.observedAt !== "string" ||
+          (event.httpStatus !== 404 && event.httpStatus !== 410) ||
+          !sameQualificationWebsiteHost(event.targetUrl, company.website) ||
+          typeof event.anchorText !== "string" ||
+          !event.anchorText.trim() ||
+          event.url !== event.finalUrl)
     )
       return [];
-    const publishedAt = Date.parse(event.publishedAt);
+    const sourceDate =
+      kind === "employer_event"
+        ? String(event.publishedAt)
+        : String(event.observedAt);
+    const publishedAt = Date.parse(sourceDate);
     if (
       !Number.isFinite(publishedAt) ||
       publishedAt > args.now ||
-      args.now - publishedAt > EMPLOYER_EVENT_MAX_AGE_MS
+      args.now - publishedAt >
+        (kind === "employer_event"
+          ? EMPLOYER_EVENT_MAX_AGE_MS
+          : OBSERVED_SITE_PROBLEM_MAX_AGE_MS)
     )
       return [];
     const sourceUrl = getString(event.url)!;
-    const evidenceUrl = getString(event.finalUrl)!;
-    const sourceId = `employer:${employer.companyId}:${createStableHash(evidenceUrl)}`;
-    if (seen.has(sourceId) || seen.size >= MAX_EMPLOYER_EVENTS) return [];
+    const evidenceUrl = getString(
+      kind === "employer_event" ? event.finalUrl : event.targetUrl
+    )!;
+    const sourceId =
+      kind === "employer_event"
+        ? `employer:${employer.companyId}:${createStableHash(evidenceUrl)}`
+        : `site_problem:${employer.companyId}:${createStableHash(`${sourceUrl}|${evidenceUrl}`)}`;
+    if (
+      seen.has(sourceId) ||
+      (kind === "employer_event"
+        ? eventCount >= MAX_EMPLOYER_EVENTS
+        : observationCount >= MAX_OBSERVED_SITE_PROBLEMS)
+    )
+      return [];
     seen.add(sourceId);
+    if (kind === "employer_event") eventCount++;
+    else observationCount++;
     return [
       {
         candidateId: sourceId,
-        evidenceKind: "employer_event",
+        evidenceKind: kind,
         platform: "linkedin",
-        contentType: "employer_event",
+        contentType: kind,
         sourceId,
         sourceUrl,
         evidenceUrl,
-        authorId: `company:${employer.companyId}`,
+        authorId:
+          kind === "employer_event"
+            ? `company:${employer.companyId}`
+            : "observer:reacherx",
         employerName,
         text: event.text.trim(),
-        publishedAt: event.publishedAt,
+        ...(kind === "employer_event"
+          ? { publishedAt: sourceDate }
+          : {
+              observedAt: sourceDate,
+              companyId,
+              httpStatus: event.httpStatus as 404 | 410,
+            }),
         discoveryQueries: args.discoveryQueries,
         sourcePost: {
           ...event,
           id: sourceId,
-          evidenceKind: "employer_event",
+          evidenceKind: kind,
           employerName,
         },
       },
@@ -480,6 +542,8 @@ export function buildVerifiedQualificationSources(args: {
       !candidate ||
       (candidate.evidenceKind === "employer_event" &&
         !decision.attributedToEmployer) ||
+      (candidate.evidenceKind === "observed_site_problem" &&
+        decision.attributedToEmployer !== false) ||
       !supportingQuote ||
       !candidate.text.includes(supportingQuote)
     ) {
@@ -498,6 +562,13 @@ export function buildVerifiedQualificationSources(args: {
       authorId: candidate.authorId,
       ...(candidate.employerName
         ? { employerName: candidate.employerName }
+        : {}),
+      ...(candidate.observedAt
+        ? {
+            observedAt: candidate.observedAt,
+            companyId: candidate.companyId,
+            httpStatus: candidate.httpStatus,
+          }
         : {}),
       text: candidate.text,
       publishedAt: candidate.publishedAt,

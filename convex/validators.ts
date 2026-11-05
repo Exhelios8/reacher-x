@@ -102,6 +102,7 @@ export const targetingCriterionEvidenceValidator = v.union(
 
 export const targetingCriterionValidator = v.object({
   id: v.string(),
+  requiresProblemEvidence: v.optional(v.literal(true)),
   label: v.string(),
   description: v.string(),
   sourceQuote: v.optional(v.string()),
@@ -175,6 +176,14 @@ export const qualificationCriterionResultValidator = v.object({
   confidence: v.number(),
   rationale: v.string(),
   sourceIds: v.array(v.string()),
+  problemEvidence: v.optional(
+    v.object({
+      sourceId: v.string(),
+      problemQuote: v.string(),
+      affectedPageQuote: v.string(),
+      remedy: v.string(),
+    })
+  ),
 });
 
 export const discoveryStageValidator = v.union(
@@ -1416,7 +1425,8 @@ export const qualificationSourceContentTypeValidator = v.union(
   v.literal("reply"),
   v.literal("quote_post"),
   v.literal("profile"),
-  v.literal("employer_event")
+  v.literal("employer_event"),
+  v.literal("observed_site_problem")
 );
 
 /**
@@ -1428,7 +1438,8 @@ export const qualificationSourceValidator = v.object({
     v.literal("social_content"),
     v.literal("external_article"),
     v.literal("profile"),
-    v.literal("employer_event")
+    v.literal("employer_event"),
+    v.literal("observed_site_problem")
   ),
   platform: prospectPlatformValidator,
   contentType: qualificationSourceContentTypeValidator,
@@ -1437,6 +1448,9 @@ export const qualificationSourceValidator = v.object({
   evidenceUrl: v.optional(v.string()),
   authorId: v.string(),
   employerName: v.optional(v.string()),
+  companyId: v.optional(v.string()),
+  observedAt: v.optional(v.string()),
+  httpStatus: v.optional(v.union(v.literal(404), v.literal(410))),
   text: v.string(),
   publishedAt: v.optional(v.string()),
   discoveryQueries: v.array(v.string()),

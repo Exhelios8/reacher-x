@@ -7,7 +7,10 @@ import {
   type WorkspaceProfile,
 } from "./workspaceProfileChangeCore";
 import { reconcileWorkspaceIcpUpdate } from "./workspaceIcpSignalsCore";
-import type { WorkspaceTargetingSpec } from "./targetingSpecCore";
+import {
+  isRequiredProblemCriterion,
+  type WorkspaceTargetingSpec,
+} from "./targetingSpecCore";
 
 type Workspace = Doc<"workspaces">;
 
@@ -69,6 +72,8 @@ export function buildRegeneratedWorkspaceTargetingPatch(args: {
   useCaseKey: NonNullable<Workspace["useCaseKey"]>;
   updatedAt: number;
 }) {
+  // Explicit operator updates can reach this persistence boundary without model normalization.
+  args.targetingSpec.criteria.forEach(isRequiredProblemCriterion);
   return {
     rawUserDescription: args.rawUserDescription,
     seedDescription: args.rawUserDescription,

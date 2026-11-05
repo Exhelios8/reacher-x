@@ -229,3 +229,59 @@ it("excludes tagged, wrapped and employer-ID evidence from direct post-list acti
     expect(html.match(/<button>Reply<\/button>/g)).toHaveLength(1);
   }
 });
+
+it("shows independent site checks without publication or personal post actions", () => {
+  const observation = {
+    ...employerEvent,
+    sourceId: "site_problem:42:hash",
+    evidenceKind: "observed_site_problem",
+    contentType: "observed_site_problem",
+    authorId: "observer:reacherx",
+    sourceUrl: "https://example.com/catalogue",
+    evidenceUrl: "https://example.com/missing-category",
+    observedAt: "2026-11-05T09:00:00Z",
+    httpStatus: 404,
+    sourcePost: {
+      ...employerEvent.sourcePost,
+      id: "site_problem:42:hash",
+      evidenceKind: "observed_site_problem",
+    },
+  };
+  const prospect = normalizeProspectProfileData({
+    _id: "person",
+    platform: "linkedin",
+    displayName: "Alex Example",
+    qualificationSources: [observation, personalSource],
+    evidencePosts: [observation, { raw: observation }, personalPost],
+    painPoints: [
+      { pain: "Navigation", evidencePosts: [observation, personalPost] },
+    ],
+    finance: {
+      displayValue: "Unknown",
+      evidencePosts: [observation, personalPost],
+    },
+  });
+  expect(prospect?.evidencePosts).toHaveLength(1);
+  expect(prospect?.painPoints?.[0].evidencePosts).toHaveLength(1);
+  expect(prospect?.finance?.evidencePosts).toHaveLength(1);
+  expect(prospect?.qualificationSources?.[0].sourcePost).toBeUndefined();
+  const onOpenEvidencePosts = vi.fn();
+  const html = renderToStaticMarkup(
+    <ProspectProfilePanel
+      prospect={prospect!}
+      onOpenEvidencePosts={onOpenEvidencePosts}
+    />
+  );
+  expect(html).toContain("Website issue observed by ReacherX");
+  expect(html).toContain("Observed 2026-11-05");
+  expect(html).toContain("Verified 2026-11-05");
+  expect(html).toContain("Linked destination (HTTP 404)");
+  expect(html).toContain("not a statement by this person");
+  expect(html).not.toContain("Published");
+  expect(html.indexOf('href="https://example.com/catalogue"')).toBeLessThan(
+    html.indexOf('href="https://example.com/missing-category"')
+  );
+  expect(html.match(/<button>Reply<\/button>/g)).toHaveLength(1);
+  captured.details.onQualificationSourcesClick?.();
+  expect(onOpenEvidencePosts.mock.lastCall?.[0].posts).toHaveLength(1);
+});

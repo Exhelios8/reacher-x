@@ -38,7 +38,14 @@ import {
   qualificationAuditOutcomeValidator,
   qualificationFailureValidator,
 } from "../validators";
-import { buildLegacyWorkspaceTargetingSpec } from "../lib/targetingSpecCore";
+import {
+  buildLegacyWorkspaceTargetingSpec,
+  isRequiredProblemCriterion,
+  shouldUseLinkedInPeopleDiscovery,
+} from "../lib/targetingSpecCore";
+import { isAccountFirstDiscoveryEnabled } from "../lib/accountFirstDiscoveryCore";
+import { resolveLinkedInProspectProfileIdentifiers } from "../integrations/linkedin/profileIdentity";
+import { isRecord } from "../lib/typeGuards";
 
 const AUDIT_PAGE_SIZE = 30;
 const AUDIT_BATCH_SIZE = 3;
@@ -428,8 +435,36 @@ async function auditProspect(
     profileData: context.profileData,
     discoveryQueries,
   });
+  const identity = resolveLinkedInProspectProfileIdentifiers(prospect);
+  const data = isRecord(prospect.data) ? prospect.data : {};
+  const author = isRecord(data.author) ? data.author : {};
+  const linkedIn = prospect.socialProfiles?.linkedin;
+  const hasCompanyProfileUrl = [
+    linkedIn?.url,
+    data.url,
+    data.linkedinUrl,
+    author.url,
+    author.profileUrl,
+  ].some(
+    (url) =>
+      typeof url === "string" &&
+      /^https?:\/\/(?:www\.)?linkedin\.com\/company\//i.test(url)
+  );
+  // Let the shared evaluator acquire and verify current employer evidence before
+  // requiring personal posts. Its cache fingerprint, age and identity checks
+  // still apply, including when this opt-in has changed since qualification.
+  const evaluateEmployerFirst =
+    prospect.workspaceId === workspace._id &&
+    prospect.platform === "linkedin" &&
+    prospect.prospectType !== "organization" &&
+    !hasCompanyProfileUrl &&
+    ["search_people", "search_post"].includes(prospect.discoverySource ?? "") &&
+    Boolean(identity.username || identity.profileUrn) &&
+    isAccountFirstDiscoveryEnabled(workspace._id) &&
+    workspace.targetingSpec?.criteria.some(isRequiredProblemCriterion) &&
+    shouldUseLinkedInPeopleDiscovery(workspace.targetingSpec);
 
-  if (existingCandidates.length === 0) {
+  if (existingCandidates.length === 0 && !evaluateEmployerFirst) {
     const refetch = await refetchProspectEvidence(ctx, {
       prospect,
       providerIdentity: context.providerIdentity,
@@ -479,6 +514,9 @@ async function auditProspect(
       routing: "onboarding",
     });
   } catch (error) {
+    const evidenceFetchFailed =
+      error instanceof Error &&
+      error.message.includes("[QualificationEvidence]");
     const failure: QualificationFailure =
       error instanceof QualificationEvaluationError
         ? {
@@ -491,9 +529,13 @@ async function auditProspect(
             failedAt: getCurrentUTCTimestamp(),
           }
         : {
-            stage: "model_evaluation",
-            provider: "configured_llm_route",
-            code: "qualification_evaluation_threw",
+            stage: evidenceFetchFailed ? "evidence_fetch" : "model_evaluation",
+            provider: evidenceFetchFailed
+              ? "qualification_evidence"
+              : "configured_llm_route",
+            code: evidenceFetchFailed
+              ? "qualification_evidence_fetch_failed"
+              : "qualification_evaluation_threw",
             message:
               error instanceof Error ? error.message : "Qualification failed",
             failedAt: getCurrentUTCTimestamp(),
@@ -847,6 +889,7 @@ export const getDryRunSummaryInternal = internalQuery({
       verifiedSourceCount: item.verifiedSourceCount,
       reasoning: item.reasoning,
       error: item.error,
+      failure: item.failure,
     });
     return {
       run,

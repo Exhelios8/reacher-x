@@ -171,9 +171,11 @@ function extractVerifiedQualificationEvidenceHighlights(
       const quote = source.supportingQuote.trim();
       return quote
         ? [
-            source.evidenceKind === "employer_event"
-              ? `Official employer event (${source.employerName ?? "company"}), not a personal statement. ${source.evidenceUrl ?? source.sourceUrl}: ${quote}`
-              : quote,
+            source.evidenceKind === "observed_site_problem"
+              ? `Independent ReacherX website observation, not a personal or company statement. Observed ${source.observedAt ?? "unknown"}; official linking page ${source.sourceUrl}; linked destination ${source.evidenceUrl ?? "unknown"} returned HTTP ${source.httpStatus ?? "unknown"}, checked twice. No role, buying intent or financial fact is established: ${quote}`
+              : source.evidenceKind === "employer_event"
+                ? `Official employer event (${source.employerName ?? "company"}), not a personal statement. ${source.evidenceUrl ?? source.sourceUrl}: ${quote}`
+                : quote,
           ]
         : [];
     })

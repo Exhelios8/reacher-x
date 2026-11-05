@@ -120,6 +120,33 @@ describe("workspace targeting persistence", () => {
       manualProfile("Local clinic owners"),
     ];
 
+    const invalidSpec = buildLegacyWorkspaceTargetingSpec({
+      description: "Find doctors",
+      profiles,
+    });
+    invalidSpec.criteria[0] = {
+      ...invalidSpec.criteria[0],
+      id: "role",
+      requiresProblemEvidence: true,
+    };
+    const before = await t.run((ctx) => ctx.db.get(workspaceId));
+    await expect(
+      t.mutation(
+        internal.workspaces.applyRegeneratedWorkspaceTargetingInternal,
+        {
+          workspaceId,
+          userId,
+          name: "Rejected change",
+          rawUserDescription: "Find doctors",
+          improvedDescription: "Find doctors",
+          icps: profiles,
+          targetingSpec: invalidSpec,
+          useCaseKey: "general_outreach",
+        }
+      )
+    ).rejects.toThrow("requiresProblemEvidence");
+    expect(await t.run((ctx) => ctx.db.get(workspaceId))).toEqual(before);
+
     await t.mutation(
       internal.workspaces.applyRegeneratedWorkspaceTargetingInternal,
       {

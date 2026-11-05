@@ -7,11 +7,48 @@ export type WorkspaceTargetingSpec = Infer<
   typeof workspaceTargetingSpecValidator
 >;
 export type TargetingCriterion = WorkspaceTargetingSpec["criteria"][number];
+export function isRequiredProblemCriterion(
+  criterion: TargetingCriterion | undefined
+): boolean {
+  if (!criterion?.requiresProblemEvidence) return false;
+  if (
+    criterion.id !== "need" ||
+    criterion.kind !== "required" ||
+    criterion.category !== "intent" ||
+    criterion.evidence !== "either"
+  )
+    throw new Error(
+      "requiresProblemEvidence is only valid on the required need criterion with intent/either evidence."
+    );
+  return true;
+}
 export type DiscoveryStage = "strict" | "balanced" | "broad";
 
 const MAX_CRITERIA = 12;
 const MAX_TERMS_PER_CRITERION = 12;
 const MAX_SEARCH_HINTS_PER_GROUP = 20;
+
+/** Model-generated revisions cannot silently remove an operator's proof requirement. */
+export function preserveRequiredProblemCriterion(
+  generated: WorkspaceTargetingSpec,
+  previous?: WorkspaceTargetingSpec
+): WorkspaceTargetingSpec {
+  const required = previous?.criteria.find(isRequiredProblemCriterion);
+  if (!required) return generated;
+  if (generated.criteria.some((criterion) => criterion.id === required.id)) {
+    return {
+      ...generated,
+      criteria: generated.criteria.map((criterion) =>
+        criterion.id === required.id ? required : criterion
+      ),
+    };
+  }
+  if (generated.criteria.length >= MAX_CRITERIA)
+    throw new Error(
+      "Targeting revision has no room for the required problem criterion."
+    );
+  return { ...generated, criteria: [...generated.criteria, required] };
+}
 
 function normalizeText(value: string): string {
   return value.replace(/\s+/g, " ").trim();
@@ -94,7 +131,7 @@ export function normalizeWorkspaceTargetingSpec(
       }
       usedIds.add(id);
 
-      return {
+      const normalized = {
         ...criterion,
         id,
         label: normalizeText(criterion.label).slice(0, 120),
@@ -102,6 +139,8 @@ export function normalizeWorkspaceTargetingSpec(
         weight: Math.min(5, Math.max(1, Math.round(criterion.weight))),
         terms: uniqueText(criterion.terms, MAX_TERMS_PER_CRITERION),
       };
+      isRequiredProblemCriterion(normalized);
+      return normalized;
     });
   const locations = uniqueText(
     spec.searchHints.locations,

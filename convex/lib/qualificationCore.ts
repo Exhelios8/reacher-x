@@ -27,7 +27,11 @@ import {
   passesQualificationGate,
   hasVerifiedGoalConflict,
   compactQualificationSourcesForWorkflow,
+  EMPLOYER_EVENT_MAX_AGE_MS,
   MAX_EMPLOYER_EVENTS,
+  MAX_OBSERVED_SITE_PROBLEMS,
+  OBSERVED_SITE_PROBLEM_MAX_AGE_MS,
+  type QualificationCandidate,
   type QualificationSource,
   type QualificationExternalArticle,
   type QualificationVerification,
@@ -40,8 +44,14 @@ import {
   type QualificationCriterionResult,
   type QualificationScoreBreakdown,
 } from "./qualificationScoringCore";
-import { formatQualificationModelFailure } from "./qualificationFailureCore";
-import type { WorkspaceTargetingSpec } from "./targetingSpecCore";
+import {
+  formatQualificationModelFailure,
+  REQUIRED_PROBLEM_SOURCE_UNAVAILABLE,
+} from "./qualificationFailureCore";
+import {
+  isRequiredProblemCriterion,
+  type WorkspaceTargetingSpec,
+} from "./targetingSpecCore";
 
 export const QUALIFICATION_THRESHOLD = SHARED_QUALIFICATION_THRESHOLD;
 export const MAX_EVIDENCE_POSTS = 20;
@@ -51,6 +61,13 @@ export const MAX_KEYWORDS_TO_SEARCH = 10;
 export const MAX_QUALIFICATION_OUTPUT_TOKENS = 16_384;
 
 const qualificationLogger = logger.withScope("QualificationCore");
+class RequiredProblemSourceUnavailable extends Error {
+  constructor() {
+    super(
+      `${REQUIRED_PROBLEM_SOURCE_UNAVAILABLE}. Retry acquisition before issuing a negative verdict.`
+    );
+  }
+}
 
 const MS_PER_DAY = 1000 * 60 * 60 * 24;
 
@@ -91,7 +108,12 @@ const llmQualificationSchema = z.object({
         rationale: z.string().max(1_000),
         candidateIds: z
           .array(z.string().max(120))
-          .max(MAX_EVIDENCE_POSTS + MAX_EMPLOYER_EVENTS + 1),
+          .max(
+            MAX_EVIDENCE_POSTS +
+              MAX_EMPLOYER_EVENTS +
+              MAX_OBSERVED_SITE_PROBLEMS +
+              1
+          ),
         employerEventSupport: z
           .enum(["operational_activity", "none"])
           .describe(
@@ -121,8 +143,75 @@ const llmQualificationSchema = z.object({
           ),
       })
     )
-    .max(MAX_EVIDENCE_POSTS + MAX_EMPLOYER_EVENTS + 1),
+    .max(
+      MAX_EVIDENCE_POSTS + MAX_EMPLOYER_EVENTS + MAX_OBSERVED_SITE_PROBLEMS + 1
+    ),
 });
+
+// Requested only for explicitly configured workspaces. Older callers keep their original output schema.
+const problemAssessmentSchema = z.object({
+  status: z.enum(["unresolved", "absent_or_resolved", "unknown"]),
+  candidateId: z.string().max(120),
+  problemQuote: z.string().trim().max(1000),
+  affectedPageQuote: z.string().trim().max(500),
+  remedy: z.string().trim().max(500),
+});
+const llmQualificationWithProblemSchema = llmQualificationSchema.extend({
+  problemEvidence: problemAssessmentSchema,
+});
+type EvaluatorResponse = z.infer<typeof llmQualificationSchema> & {
+  problemEvidence?: z.infer<typeof problemAssessmentSchema>;
+};
+
+function verifyProblemEvidence(
+  assessment: EvaluatorResponse["problemEvidence"],
+  candidates: QualificationCandidate[],
+  sources: QualificationSource[],
+  now: number
+): QualificationCriterionResult["problemEvidence"] {
+  if (
+    assessment?.status !== "unresolved" ||
+    !assessment.problemQuote ||
+    !assessment.affectedPageQuote ||
+    !assessment.remedy
+  )
+    return;
+  const candidate = candidates.find(
+    (c) => c.candidateId === assessment.candidateId
+  );
+  // Linked articles inherit the sharing post's date. Only independently dated primary sources qualify here.
+  if (
+    !candidate ||
+    !["social_content", "employer_event", "observed_site_problem"].includes(
+      candidate.evidenceKind
+    ) ||
+    !candidate.text.includes(assessment.problemQuote) ||
+    !candidate.text.includes(assessment.affectedPageQuote) ||
+    !sources.some(
+      (s) =>
+        s.sourceId === candidate.sourceId &&
+        s.evidenceKind === candidate.evidenceKind
+    )
+  )
+    return;
+  const observed = candidate.evidenceKind === "observed_site_problem";
+  const dated = Date.parse(
+    (observed ? candidate.observedAt : candidate.publishedAt) ?? ""
+  );
+  if (
+    !Number.isFinite(dated) ||
+    dated > now ||
+    now - dated >
+      (observed ? OBSERVED_SITE_PROBLEM_MAX_AGE_MS : EMPLOYER_EVENT_MAX_AGE_MS)
+  )
+    return;
+  return {
+    sourceId: candidate.sourceId,
+    problemQuote: assessment.problemQuote,
+    affectedPageQuote: assessment.affectedPageQuote,
+    remedy: assessment.remedy,
+  };
+}
 
 export interface AuthenticityResult {
   isLikelyBot: boolean;
@@ -267,6 +356,7 @@ export interface QualificationCoreParams {
   externalArticles?: QualificationExternalArticle[];
   /** Only the independently verified discovery collector may supply employer provenance. */
   employerEvidence?: Record<string, unknown>;
+  problemSourceUnavailable?: boolean;
   discoveryQueries: string[];
   totalKeywords: number;
   profileData: Record<string, unknown>;
@@ -311,6 +401,9 @@ export async function qualifyProspectCore(
     telemetry,
   } = params;
   const now = getCurrentUTCTimestamp();
+  const requiresProblemEvidence = targetingSpec.criteria.some(
+    isRequiredProblemCriterion
+  );
   const candidates = prepareQualificationCandidates({
     platform,
     evidencePosts: evidencePosts.slice(0, MAX_EVIDENCE_POSTS),
@@ -353,6 +446,8 @@ export async function qualifyProspectCore(
   }
 
   if (candidates.length === 0) {
+    if (requiresProblemEvidence && params.problemSourceUnavailable)
+      throw new RequiredProblemSourceUnavailable();
     return {
       qualified: false,
       score: 0,
@@ -388,12 +483,17 @@ export async function qualifyProspectCore(
         `Source type: ${candidate.contentType}`,
         `Source URL: ${candidate.sourceUrl}`,
         `Evidence kind: ${candidate.evidenceKind}`,
-        candidate.employerName
-          ? `Company issuer: ${candidate.employerName}; author is the employer, not the prospect.`
-          : null,
+        candidate.evidenceKind === "observed_site_problem"
+          ? `Verified technical observation by ReacherX on the current employer's website (${candidate.employerName}). No person or company made this statement.`
+          : candidate.employerName
+            ? `Company issuer: ${candidate.employerName}; author is the employer, not the prospect.`
+            : null,
         candidate.evidenceUrl ? `Evidence URL: ${candidate.evidenceUrl}` : null,
-        `Published: ${candidate.publishedAt ?? "unknown"}`,
-        candidate.evidenceKind === "employer_event"
+        candidate.evidenceKind === "observed_site_problem"
+          ? `Observed at: ${candidate.observedAt}`
+          : `Published: ${candidate.publishedAt ?? "unknown"}`,
+        candidate.evidenceKind === "employer_event" ||
+        candidate.evidenceKind === "observed_site_problem"
           ? "Not personal social activity."
           : `Engagement: ${likes} likes/reactions, ${reposts} reposts`,
         `Persisted text: ${JSON.stringify(candidate.text)}`,
@@ -434,10 +534,14 @@ When false, supportingQuote must be an empty string.
 
 Profile candidates describe responsibilities, not dated activity. They may support evidence=profile/either criteria, never activity-only criteria. Do not infer recency, intent, or responsibilities from a generic job title alone.
 
-Employer_event candidates are dated pages on the independently verified current employer's official site. They are company-attributed sources, NEVER statements or posts by the prospect. Set attributedToEmployer=true only if the exact quoted passage concerns that employer's own operational event, not a guest, customer, marketplace member or generic advice. They may support preferred operational-work or timing criteria with employerEventSupport=operational_activity. They NEVER establish individual buying intent, budget, authority, role, a mandatory criterion, an exclusion or a goal contradiction. Those need independent personal/profile evidence. A company announcement is a reason to investigate, not confirmation of purchase or outsourcing.
+Employer_event candidates are dated pages on the independently verified current employer's official site. They are company-attributed sources, NEVER statements or posts by the prospect. Set attributedToEmployer=true only if the exact quoted passage concerns that employer's own operational event, not a guest, customer, marketplace member or generic advice. They may support preferred operational-work or timing criteria with employerEventSupport=operational_activity. They NEVER establish individual buying intent, budget, authority, role, an exclusion or a goal contradiction. A company announcement is a reason to investigate, not confirmation of purchase or outsourcing. ${requiresProblemEvidence ? "The only mandatory criterion an employer event can support is need when requiresProblemEvidence=true and the primary evidence below passes." : "An employer event cannot establish a mandatory criterion."}
+
+${requiresProblemEvidence ? `For the marked required need, return problemEvidence. Only status=unresolved can match it. Cite one verified prospect-authored post or official current-employer event published in the past 90 days that documents an actual remaining problem on the company's own commercial pages, catalogue or documentation. Quote verbatim the defect or unfinished task (problemQuote) and affected URL or named page family (affectedPageQuote) from that same source. Name the specific work the offered service can do (remedy). Judge whether the problem is STILL open from the full source, including dates, negation and work already completed. An award, product publication, generic launch, completed redesign or a plausible opportunity inferred from a role or footprint does not prove unresolved work. Do not require a public declaration of SEO need, a budget, an RFP, or a particular company size. Do not infer an unseen technical defect. Include this same candidateId in need's criterionResults and mark its evidence decision supported, with accurate attribution. If no source qualifies, use absent_or_resolved or unknown, empty strings for missing fields, and never mark need matched.` : ""}
 The publication date is not automatically the event date. A recently published retrospective about old work is not current work. Timing needs a quoted passage identifying a recent, ongoing or dated future operation; do not infer current activity from a homepage fetch, headcount or an expired tender. If event timing is unclear, keep timing unknown.
 
 First complete goalAssessment: separate factual audience matches from usefulness for the user's intended contact. Explicit refusal of the offered service can contradict that goal even if the author matches every audience attribute. Evaluate the whole text, including stylized Unicode and non-English text. Record the exact conflicting quote and candidate ID. Missing proof that someone wants the service is merely unknown, NOT a contradiction. Missing preferred geography or format is NOT a goal contradiction. Do not invent universal exclusions for professions, employers, or satisfied product users.
+
+${requiresProblemEvidence ? `A third eligible primary source is observed_site_problem: ReacherX verified an actual link on a live official source page to a commercial/docs destination returning HTTP 404/410 twice, within 14 days. Use the recorded status fact for problemQuote and the destination URL or link label for affectedPageQuote; copy both verbatim from the machine record. Assess whether that exact defect is an unresolved problem the offered service can remedy. Use observedAt, not a publication date. Never call the measurement a statement by the person/company, and set attributedToEmployer=false. It can support only the marked need, never another criterion, a goal contradiction or individual intent.` : ""}
 
 Return exactly one criterionResults entry for every targeting criterion ID.
 - matched means the available profile or correctly attributed candidate evidence directly satisfies the criterion, within the source restrictions above.
@@ -479,9 +583,11 @@ Evaluate this prospect against the ICP.`;
 
   try {
     const generateQualificationCandidate = async (repairInstruction?: string) =>
-      await robustGenerateObject({
+      await robustGenerateObject<EvaluatorResponse>({
         operation: "qualifyProspect",
-        schema: llmQualificationSchema,
+        schema: requiresProblemEvidence
+          ? llmQualificationWithProblemSchema
+          : llmQualificationSchema,
         system: [buildQualificationPrompt(useCaseKey), workspaceMemoryPolicy]
           .filter(Boolean)
           .join("\n\n"),
@@ -513,6 +619,14 @@ Evaluate this prospect against the ICP.`;
     const verifiedSourceIds = new Set(
       qualificationSources.map((source) => source.sourceId)
     );
+    const problemProof = requiresProblemEvidence
+      ? verifyProblemEvidence(
+          object.problemEvidence,
+          candidates,
+          qualificationSources,
+          now
+        )
+      : undefined;
     const candidateSourceIdById = new Map(
       candidates.map((candidate) => [candidate.candidateId, candidate.sourceId])
     );
@@ -522,17 +636,40 @@ Evaluate this prospect against the ICP.`;
         const criterion = targetingSpec.criteria.find(
           (c) => c.id === result.criterionId
         );
+        if (isRequiredProblemCriterion(criterion)) {
+          const citedProof =
+            object.problemEvidence &&
+            result.candidateIds.includes(object.problemEvidence.candidateId)
+              ? problemProof
+              : undefined;
+          return {
+            criterionId: result.criterionId,
+            verdict: result.verdict,
+            confidence: result.confidence,
+            rationale: result.rationale,
+            sourceIds: citedProof ? [citedProof.sourceId] : [],
+            ...(citedProof && result.verdict === "matched"
+              ? { problemEvidence: citedProof }
+              : {}),
+          };
+        }
         const referencedCandidates = candidates.filter(
           (candidate) =>
             result.candidateIds.includes(candidate.candidateId) &&
             verifiedSourceIds.has(candidate.sourceId)
         );
+        const observedOnly =
+          referencedCandidates.length > 0 &&
+          referencedCandidates.every(
+            (candidate) => candidate.evidenceKind === "observed_site_problem"
+          );
         const employerOnly =
           referencedCandidates.length > 0 &&
           referencedCandidates.every(
-            (candidate) => candidate.evidenceKind === "employer_event"
+            (candidate) =>
+              candidate.evidenceKind === "employer_event" ||
+              candidate.evidenceKind === "observed_site_problem"
           );
-        // shortcut: mandatory company events need an explicit criterion subject before support.
         const allowsEmployerEvent =
           criterion?.kind === "preferred" &&
           criterion.evidence !== "profile" &&
@@ -540,14 +677,18 @@ Evaluate this prospect against the ICP.`;
           result.employerEventSupport === "operational_activity";
         const noIndependentProfile =
           candidates.some(
-            (candidate) => candidate.evidenceKind === "employer_event"
+            (candidate) =>
+              candidate.evidenceKind === "employer_event" ||
+              candidate.evidenceKind === "observed_site_problem"
           ) &&
           !candidates.some(
             (candidate) => candidate.evidenceKind === "profile"
           ) &&
           result.candidateIds.length === 0;
         const unsupportedEmployerBasis =
-          (employerOnly && !allowsEmployerEvent) || noIndependentProfile;
+          observedOnly ||
+          (employerOnly && !allowsEmployerEvent) ||
+          noIndependentProfile;
         return {
           criterionId: result.criterionId,
           verdict: unsupportedEmployerBasis ? "unknown" : result.verdict,
@@ -560,6 +701,8 @@ Evaluate this prospect against the ICP.`;
               result.candidateIds
                 .filter(
                   (candidateId) =>
+                    candidates.find((c) => c.candidateId === candidateId)
+                      ?.evidenceKind !== "observed_site_problem" &&
                     (candidates.find((c) => c.candidateId === candidateId)
                       ?.evidenceKind !== "employer_event" ||
                       allowsEmployerEvent) &&
@@ -591,10 +734,38 @@ Evaluate this prospect against the ICP.`;
       threshold: QUALIFICATION_THRESHOLD,
     });
     const scoreBreakdown = targetingScore.breakdown;
+    const unprovenProblem = requiresProblemEvidence
+      ? criterionResults.find(
+          (result) =>
+            result.criterionId === "need" && result.verdict !== "matched"
+        )
+      : undefined;
     const goalConflict = hasVerifiedGoalConflict(
       candidates,
       object.goalAssessment
     );
+    if (
+      unprovenProblem &&
+      !unprovenProblem.problemEvidence &&
+      params.problemSourceUnavailable &&
+      !goalConflict &&
+      !object.isLikelyBot
+    ) {
+      const independentMismatch = targetingSpec.criteria.some((criterion) => {
+        if (isRequiredProblemCriterion(criterion)) return false;
+        const decision = criterionResults.find(
+          (item) => item.criterionId === criterion.id
+        );
+        return (
+          (criterion.kind === "required" &&
+            decision?.verdict === "not_matched") ||
+          (criterion.kind === "exclusion" &&
+            decision?.verdict === "matched" &&
+            decision.confidence >= 0.7)
+        );
+      });
+      if (!independentMismatch) throw new RequiredProblemSourceUnavailable();
+    }
     const finalQualified = passesQualificationGate({
       modelQualified: targetingScore.qualified && !goalConflict,
       isLikelyBot: object.isLikelyBot,
@@ -651,7 +822,7 @@ Evaluate this prospect against the ICP.`;
         flags: object.botFlags,
         now,
       }),
-      matchReasoning: object.reasoning,
+      matchReasoning: unprovenProblem?.rationale ?? object.reasoning,
       reasoning: goalConflict
         ? `${object.reasoning} Evidence contradicts the user's contact goal: ${object.goalAssessment.rationale} Quote: ${object.goalAssessment.conflictingQuote}`
         : targetingScore.hardFailureCriterionIds.length > 0
@@ -661,7 +832,11 @@ Evaluate this prospect against the ICP.`;
     };
   } catch (error) {
     // Preserve the verifier's actual model/provider and retry classification.
-    if (error instanceof QualificationEvaluationError) throw error;
+    if (
+      error instanceof QualificationEvaluationError ||
+      error instanceof RequiredProblemSourceUnavailable
+    )
+      throw error;
     // Rebuild route-specific request options instead of forwarding native
     // structured-output parameters to an endpoint that cannot accept them.
     // The strong route never falls back to the first-pass model.

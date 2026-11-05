@@ -3,6 +3,7 @@
 import { clearWorkspaceKeywords } from "./lib/keywordResetCore";
 
 import { getWorkspaceIcpRefreshFingerprint } from "./lib/workspaceIcpSignalsCore";
+import { preserveRequiredProblemCriterion } from "./lib/targetingSpecCore";
 import type { WorkflowId } from "@convex-dev/workflow";
 import type { ProviderMetadata } from "ai";
 import { v } from "convex/values";
@@ -145,6 +146,10 @@ export const regenerateWorkspaceTargeting = action({
       seedDescription: rawUserDescription,
       useCaseKey: classification.useCaseKey,
     });
+    generation.targetingSpec = preserveRequiredProblemCriterion(
+      generation.targetingSpec,
+      workspace.targetingSpec
+    );
     await recordGenerationTelemetry(ctx, {
       agentName: "Workspace Targeting Generator",
       telemetry: generation.telemetry,

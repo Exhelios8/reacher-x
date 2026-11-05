@@ -6,6 +6,7 @@ import { internal } from "../_generated/api";
 import {
   collectQualificationDiscoveryEvidence,
   getQualificationProfileText,
+  isRetryableProblemSourceFailure,
 } from "./qualificationDiscoveryEvidenceCore";
 import { isRecord } from "./typeGuards";
 import { hydrateQualificationEvidence } from "./qualificationEvidenceCore";
@@ -108,6 +109,9 @@ export async function evaluateQualificationWithExternalArticles(
     profileData,
     profileEvidence,
     employerEvidence,
+    problemSourceUnavailable:
+      isRetryableProblemSourceFailure(employerEvidence?.eventSearchError) ||
+      employerEvidence?.siteProblemFetchRetryable === true,
     externalArticles,
     telemetry: {
       ctx,

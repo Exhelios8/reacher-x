@@ -20,6 +20,7 @@ type AgentMemoryRagFilters = {
   contentType:
     | "evidence_post"
     | "employer_event"
+    | "observed_site_problem"
     | "pain_point"
     | "profile"
     | "query_candidate"

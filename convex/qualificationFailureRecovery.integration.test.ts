@@ -120,73 +120,88 @@ describe("qualification model failure recovery", () => {
     ).toHaveLength(2);
   });
 
-  test("retries non-model workflow failures instead of orphaning pending state", async () => {
-    vi.useFakeTimers();
-    vi.setSystemTime(new Date("2026-08-30T12:00:00.000Z"));
-    const t = convexTest(schema, modules);
-    polarTest.register(t);
-    const seeded = await t.run(async (ctx) => {
-      const userId = await ctx.db.insert("users", {
-        workosUserId: "qualification-workflow-failure-user",
-        email: "qualification-workflow-failure@example.test",
+  test.each([
+    [
+      "ArgumentValidationError: legacy memory id mismatch",
+      "workflow",
+      "qualification_workflow_failed",
+    ],
+    [
+      "[QualificationEvidence] A required problem source is temporarily unavailable. Retry acquisition before issuing a negative verdict.",
+      "evidence_fetch",
+      "qualification_evidence_fetch_failed",
+    ],
+  ])(
+    "retries %s without orphaning pending state",
+    async (error, stage, code) => {
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date("2026-08-30T12:00:00.000Z"));
+      const t = convexTest(schema, modules);
+      polarTest.register(t);
+      const seeded = await t.run(async (ctx) => {
+        const userId = await ctx.db.insert("users", {
+          workosUserId: "qualification-workflow-failure-user",
+          email: "qualification-workflow-failure@example.test",
+        });
+        await ctx.db.insert("userPlans", {
+          userId,
+          tier: "hobby",
+          ...PLAN_LIMITS.hobby,
+          currentProspectsCount: 0,
+          updatedAt: 1,
+        });
+        const workspaceId = await ctx.db.insert("workspaces", {
+          userId,
+          name: "Qualification workflow failure",
+          description: "Qualification workflow failure test workspace",
+          isDefault: true,
+          updatedAt: 1,
+        });
+        const prospectId = await ctx.db.insert("prospects", {
+          workspaceId,
+          userId,
+          platform: "linkedin",
+          origin: "workspace_discovery",
+          externalId: "qualification-workflow-failure-prospect",
+          data: {},
+          status: "new",
+          qualificationStatus: "pending",
+          qualificationWorkflowId: "qualification-workflow-failure",
+          updatedAt: 1,
+        });
+        return { prospectId };
       });
-      await ctx.db.insert("userPlans", {
-        userId,
-        tier: "hobby",
-        ...PLAN_LIMITS.hobby,
-        currentProspectsCount: 0,
-        updatedAt: 1,
-      });
-      const workspaceId = await ctx.db.insert("workspaces", {
-        userId,
-        name: "Qualification workflow failure",
-        description: "Qualification workflow failure test workspace",
-        isDefault: true,
-        updatedAt: 1,
-      });
-      const prospectId = await ctx.db.insert("prospects", {
-        workspaceId,
-        userId,
-        platform: "linkedin",
-        origin: "workspace_discovery",
-        externalId: "qualification-workflow-failure-prospect",
-        data: {},
-        status: "new",
-        qualificationStatus: "pending",
-        qualificationWorkflowId: "qualification-workflow-failure",
-        updatedAt: 1,
-      });
-      return { prospectId };
-    });
 
-    await t.mutation(
-      internal.workflows.qualification.handleQualificationComplete,
-      {
-        workflowId: "qualification-workflow-failure" as WorkflowId,
-        result: {
-          kind: "failed",
-          error: "ArgumentValidationError: legacy memory id mismatch",
-        },
-        context: { prospectId: seeded.prospectId },
-      }
-    );
+      await t.mutation(
+        internal.workflows.qualification.handleQualificationComplete,
+        {
+          workflowId: "qualification-workflow-failure" as WorkflowId,
+          result: {
+            kind: "failed",
+            error,
+          },
+          context: { prospectId: seeded.prospectId },
+        }
+      );
 
-    const state = await t.run(async (ctx) => ({
-      prospect: await ctx.db.get("prospects", seeded.prospectId),
-      scheduled: await ctx.db.system.query("_scheduled_functions").collect(),
-    }));
-    expect(state.prospect?.qualificationLastFailure).toMatchObject({
-      stage: "workflow",
-      code: "qualification_workflow_failed",
-      workflowAttemptCount: 1,
-    });
-    expect(state.prospect?.qualificationLastFailure?.nextRetryAt).toBe(
-      Date.now() + getQualificationFailureRetryDelayMs(1)
-    );
-    expect(
-      state.scheduled.filter((job) => job.name.includes("startQualification"))
-    ).toHaveLength(1);
-  });
+      const state = await t.run(async (ctx) => ({
+        prospect: await ctx.db.get("prospects", seeded.prospectId),
+        scheduled: await ctx.db.system.query("_scheduled_functions").collect(),
+      }));
+      expect(state.prospect?.qualificationLastFailure).toMatchObject({
+        stage,
+        code,
+        workflowAttemptCount: 1,
+      });
+      expect(state.prospect?.qualificationStatus).toBe("pending");
+      expect(state.prospect?.qualificationLastFailure?.nextRetryAt).toBe(
+        Date.now() + getQualificationFailureRetryDelayMs(1)
+      );
+      expect(
+        state.scheduled.filter((job) => job.name.includes("startQualification"))
+      ).toHaveLength(1);
+    }
+  );
 
   test("claims an orphaned pending prospect once and preserves future retries", async () => {
     vi.useFakeTimers();

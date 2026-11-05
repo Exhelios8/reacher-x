@@ -1,4 +1,5 @@
 import type { Infer } from "convex/values";
+import { isRequiredProblemCriterion } from "./targetingSpecCore";
 import type {
   TargetingCriterion,
   WorkspaceTargetingSpec,
@@ -183,6 +184,21 @@ export function reconcileQualificationCriterionResults(args: {
       };
     }
 
+    if (
+      isRequiredProblemCriterion(criterion) &&
+      result.verdict === "matched" &&
+      (!result.problemEvidence ||
+        !result.sourceIds.includes(result.problemEvidence.sourceId))
+    ) {
+      return {
+        ...result,
+        verdict: "unknown" as const,
+        confidence: 0,
+        sourceIds: [],
+        rationale:
+          "No verified source establishes a concrete unresolved problem on an identified page or page family.",
+      };
+    }
     if (
       criterion.kind !== "exclusion" &&
       criterion.evidence === "activity" &&

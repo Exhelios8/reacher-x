@@ -9,6 +9,7 @@ import {
   normalizeLinkedInProfileQueryUrn,
 } from "../integrations/linkedin/profileIdentity";
 import { getLearningTargetingFingerprint } from "./learningTargetingHelpers";
+import { isRequiredProblemCriterion } from "./targetingSpecCore";
 import { getCurrentUTCTimestamp } from "../../shared/lib/utils/time/timeUtils";
 import { readWebPages, searchWeb } from "./researchCore";
 import {
@@ -17,12 +18,27 @@ import {
   sameQualificationWebsiteHost as sameWebsiteHost,
 } from "./qualificationEvidenceCore";
 import { classifyProviderFailure } from "./providerReliability";
+
 import { isAccountFirstDiscoveryEnabled } from "./accountFirstDiscoveryCore";
+import {
+  observeOfficialSiteProblem,
+  QualificationSiteProblemRetryableError,
+} from "./qualificationSiteProblemCore";
 import {
   sanitizeLinkedInProfileForWorkflow,
   sanitizeWorkflowString,
   sanitizeWorkflowValue,
 } from "./workflowSafeProspect";
+
+export function isRetryableProblemSourceFailure(message: unknown): boolean {
+  if (typeof message !== "string" || !message) return false;
+  const { reason } = classifyProviderFailure(message);
+  return (
+    reason === "transient" ||
+    reason === "rate_limit" ||
+    message.includes("provider circuit is open")
+  );
+}
 
 function companyId(value: unknown): string | undefined {
   const id =
@@ -100,14 +116,21 @@ export async function collectQualificationDiscoveryEvidence(
   const eventCriteria =
     workspace.targetingSpec?.criteria.filter(
       (criterion) =>
-        criterion.kind === "preferred" &&
-        criterion.evidence !== "profile" &&
-        criterion.category !== "profile_fit"
+        isRequiredProblemCriterion(criterion) ||
+        (criterion.kind === "preferred" &&
+          criterion.evidence !== "profile" &&
+          criterion.category !== "profile_fit")
     ) ?? [];
   const employerEventsEnabled =
     isAccountFirstDiscoveryEnabled(prospect.workspaceId) &&
     eventCriteria.length > 0;
-  const contextVersion = employerEventsEnabled ? 3 : 2;
+  const observeSiteProblems =
+    employerEventsEnabled && eventCriteria.some(isRequiredProblemCriterion);
+  const contextVersion = observeSiteProblems
+    ? 4
+    : employerEventsEnabled
+      ? 3
+      : 2;
   const cachedData = prospect.qualificationProfileData;
   const cachedEmployer =
     isRecord(cachedData) && isRecord(cachedData.employerEvidence)
@@ -133,6 +156,10 @@ export async function collectQualificationDiscoveryEvidence(
     employerEventsEnabled &&
     typeof cachedEmployer?.eventRetryAfter === "number" &&
     cachedEmployer.eventRetryAfter <= getCurrentUTCTimestamp();
+  const siteProblemRetryDue =
+    observeSiteProblems &&
+    typeof cachedEmployer?.siteProblemRetryAfter === "number" &&
+    cachedEmployer.siteProblemRetryAfter <= getCurrentUTCTimestamp();
   if (
     isRecord(prospect.qualificationProfileData) &&
     prospect.qualificationEvidenceFetchedAt &&
@@ -142,6 +169,7 @@ export async function collectQualificationDiscoveryEvidence(
       prospect.qualificationProfileData.qualificationTargetingFingerprint ===
         targetingFingerprint) &&
     !eventRetryDue &&
+    !siteProblemRetryDue &&
     cacheIdentityMatches &&
     cacheAgeValid
   ) {
@@ -341,6 +369,8 @@ export async function collectQualificationDiscoveryEvidence(
             })
           : [];
         for (const page of pages) {
+          if (isRetryableProblemSourceFailure(page.error))
+            eventSearchError = page.error?.slice(0, 600);
           const publishedAt = Date.parse(page.publishedDate ?? "");
           if (
             page.error ||
@@ -368,7 +398,24 @@ export async function collectQualificationDiscoveryEvidence(
         eventSearchError = String(error).slice(0, 600);
       }
     }
-    // Company context and events are never added to prospect-authored social posts.
+    let observation;
+    let siteProblemFetchRetryable = false;
+    if (observeSiteProblems && typeof company.website === "string") {
+      try {
+        observation = await observeOfficialSiteProblem({
+          companyId: employerId,
+          officialWebsite: company.website,
+          sourceUrl:
+            getStringProperty(events[0] ?? {}, "finalUrl") ??
+            getStringProperty(officialWebsiteEvidence ?? {}, "finalUrl") ??
+            company.website,
+        });
+      } catch (error) {
+        siteProblemFetchRetryable =
+          error instanceof QualificationSiteProblemRetryableError;
+      }
+    }
+    // Company context and observations are never added to prospect-authored social posts.
     profileData.employerEvidence = sanitizeWorkflowValue({
       companyId: employerId,
       personUrn: urn,
@@ -378,6 +425,18 @@ export async function collectQualificationDiscoveryEvidence(
       officialWebsiteEvidence,
       websiteReadError,
       events,
+      ...(observeSiteProblems
+        ? {
+            siteProblems: observation ? [observation] : [],
+            ...(siteProblemFetchRetryable
+              ? {
+                  siteProblemFetchRetryable: true,
+                  siteProblemRetryAfter:
+                    getCurrentUTCTimestamp() + 30 * 60 * 1000,
+                }
+              : {}),
+          }
+        : {}),
       eventSearchError,
       ...(eventSearchError
         ? { eventRetryAfter: getCurrentUTCTimestamp() + 30 * 60 * 1000 }

@@ -45,7 +45,7 @@ import { getTwitterPostId } from "@/shared/lib/twitter/contracts";
 import type { TwitterUrlEntity } from "@/shared/lib/twitter/profileLinks";
 import { useActiveUseCaseLabels } from "@/shared/hooks";
 import { getProspectDisplayTimestamp } from "../../lib/getProspectDisplayTimestamp";
-import { isEmployerEventEvidence } from "../../lib/prospectEvidence";
+import { isCompanyContextEvidence } from "../../lib/prospectEvidence";
 import {
   UI_PREVIEW_ACTIVITY,
   UI_PREVIEW_INTERACTIONS,
@@ -90,6 +90,9 @@ export interface ProspectProfileData {
     sourceUrl?: string;
     employerName?: string;
     supportingQuote?: string;
+    evidenceUrl?: string;
+    httpStatus?: 404 | 410;
+    observedAt?: string;
     publishedAt?: string;
     verifiedAt?: number;
     sourcePost: unknown;
@@ -173,7 +176,9 @@ export function ProspectProfilePanel({
   // Handle pain point click - push evidence panel
   const handlePainClick = (painPoint: PainPoint) => {
     const evidencePosts = Array.isArray(painPoint.evidencePosts)
-      ? painPoint.evidencePosts.filter((post) => !isEmployerEventEvidence(post))
+      ? painPoint.evidencePosts.filter(
+          (post) => !isCompanyContextEvidence(post)
+        )
       : [];
     if (evidencePosts.length === 0) {
       return;
@@ -201,7 +206,7 @@ export function ProspectProfilePanel({
 
     const evidencePosts = Array.isArray(prospect?.finance?.evidencePosts)
       ? prospect.finance.evidencePosts.filter(
-          (post) => !isEmployerEventEvidence(post)
+          (post) => !isCompanyContextEvidence(post)
         )
       : [];
     if (evidencePosts.length > 0) {
@@ -226,7 +231,7 @@ export function ProspectProfilePanel({
     }
 
     const posts = (prospect.qualificationSources ?? []).flatMap((source) =>
-      !isEmployerEventEvidence(source) && source.sourcePost
+      !isCompanyContextEvidence(source) && source.sourcePost
         ? [source.sourcePost]
         : []
     );
@@ -345,9 +350,9 @@ export function ProspectProfilePanel({
         ...(prospect.painPoints?.flatMap((pp) => pp.evidencePosts || []) || []),
         ...(prospect.finance?.evidencePosts || []),
         ...(prospect.qualificationSources
-          ?.filter((source) => !isEmployerEventEvidence(source))
+          ?.filter((source) => !isCompanyContextEvidence(source))
           .map((source) => source.sourcePost) || []),
-      ].filter((post) => !isEmployerEventEvidence(post))
+      ].filter((post) => !isCompanyContextEvidence(post))
     );
   }, [prospect]);
 
@@ -482,7 +487,7 @@ export function ProspectProfilePanel({
                         qualificationScore={prospect.qualificationScore}
                         qualificationSourceCount={
                           prospect.qualificationSources?.filter(
-                            (source) => !isEmployerEventEvidence(source)
+                            (source) => !isCompanyContextEvidence(source)
                           ).length
                         }
                         status={prospect.status}
@@ -509,11 +514,13 @@ export function ProspectProfilePanel({
                         }
                       />
                       {prospect.qualificationSources
-                        ?.filter((source) => isEmployerEventEvidence(source))
+                        ?.filter((source) => isCompanyContextEvidence(source))
                         .map((source) => (
                           <div key={source.sourceId} className="mt-3 text-sm">
                             <p className="text-muted-foreground">
-                              Company event
+                              {source.evidenceKind === "observed_site_problem"
+                                ? "Website issue observed by ReacherX"
+                                : "Company event"}
                               {source.employerName
                                 ? ` · ${source.employerName}`
                                 : ""}
@@ -525,17 +532,46 @@ export function ProspectProfilePanel({
                                 rel="noopener noreferrer"
                                 className="break-words underline"
                               >
-                                Official company source
+                                {source.evidenceKind === "observed_site_problem"
+                                  ? "Official page linking to the issue"
+                                  : "Official company source"}
                               </a>
                             )}
-                            {source.publishedAt && (
-                              <p className="text-muted-foreground">
-                                Published{" "}
-                                {new Date(source.publishedAt)
-                                  .toISOString()
-                                  .slice(0, 10)}
-                              </p>
-                            )}
+                            {source.evidenceKind === "observed_site_problem" &&
+                              source.evidenceUrl && (
+                                <p>
+                                  <a
+                                    href={source.evidenceUrl}
+                                    target="_blank"
+                                    rel="noopener noreferrer"
+                                    className="break-words underline"
+                                  >
+                                    Linked destination
+                                    {source.httpStatus
+                                      ? ` (HTTP ${source.httpStatus})`
+                                      : ""}
+                                  </a>
+                                </p>
+                              )}
+                            {source.observedAt &&
+                              source.evidenceKind ===
+                                "observed_site_problem" && (
+                                <p className="text-muted-foreground">
+                                  Observed{" "}
+                                  {new Date(source.observedAt)
+                                    .toISOString()
+                                    .slice(0, 10)}
+                                </p>
+                              )}
+                            {source.evidenceKind !== "observed_site_problem" &&
+                              source.publishedAt && (
+                                <p className="text-muted-foreground">
+                                  Published{" "}
+                                  {new Date(source.publishedAt)
+                                    .toISOString()
+                                    .slice(0, 10)}
+                                </p>
+                              )}
                             {source.verifiedAt && (
                               <p className="text-muted-foreground">
                                 Verified{" "}
@@ -544,14 +580,16 @@ export function ProspectProfilePanel({
                                   .slice(0, 10)}
                               </p>
                             )}
-                            {source.supportingQuote && (
-                              <blockquote className="mt-1 border-l-2 pl-3">
-                                {source.supportingQuote}
-                              </blockquote>
-                            )}
+                            {source.evidenceKind !== "observed_site_problem" &&
+                              source.supportingQuote && (
+                                <blockquote className="mt-1 border-l-2 pl-3">
+                                  {source.supportingQuote}
+                                </blockquote>
+                              )}
                             <p className="text-muted-foreground mt-1 text-xs">
-                              Company context. Individual buying intent is
-                              unconfirmed.
+                              {source.evidenceKind === "observed_site_problem"
+                                ? "Independently checked twice. This is a website observation, not a statement by this person or proof of buying intent."
+                                : "Company context. Individual buying intent is unconfirmed."}
                             </p>
                           </div>
                         ))}

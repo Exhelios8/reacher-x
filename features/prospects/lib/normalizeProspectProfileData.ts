@@ -13,7 +13,7 @@ import {
   normalizeLinkedInPost,
 } from "@/shared/lib/linkedin/post";
 import { isPublicHttpUrl } from "@/shared/lib/utils/url/urlSafety";
-import { isEmployerEventEvidence } from "./prospectEvidence";
+import { isCompanyContextEvidence } from "./prospectEvidence";
 
 function getPublicEvidenceUrl(value: unknown): string | undefined {
   if (typeof value !== "string" || !isPublicHttpUrl(value)) return undefined;
@@ -81,7 +81,7 @@ export function normalizeProspectProfileData(
   const data = prospect.data as Record<string, unknown> | undefined;
   const socialProfiles = prospect.socialProfiles as SocialProfiles | undefined;
   const rawEvidencePosts = Array.isArray(prospect.evidencePosts)
-    ? prospect.evidencePosts.filter((post) => !isEmployerEventEvidence(post))
+    ? prospect.evidencePosts.filter((post) => !isCompanyContextEvidence(post))
     : [];
   const rawPainPoints = prospect.painPoints as PainPoint[] | undefined;
   const rawFinance = prospect.finance as
@@ -107,7 +107,7 @@ export function normalizeProspectProfileData(
     ...painPoint,
     evidencePosts: Array.isArray(painPoint.evidencePosts)
       ? painPoint.evidencePosts
-          .filter((post) => !isEmployerEventEvidence(post))
+          .filter((post) => !isCompanyContextEvidence(post))
           .map(resolveEvidencePost)
       : [],
   }));
@@ -117,7 +117,7 @@ export function normalizeProspectProfileData(
         displayValue: rawFinance.displayValue,
         evidencePosts: Array.isArray(rawFinance.evidencePosts)
           ? rawFinance.evidencePosts
-              .filter((post) => !isEmployerEventEvidence(post))
+              .filter((post) => !isCompanyContextEvidence(post))
               .map(resolveEvidencePost)
           : [],
       }
@@ -141,7 +141,9 @@ export function normalizeProspectProfileData(
                   ? source.evidenceKind
                   : undefined,
               sourceUrl: getPublicEvidenceUrl(
-                source.evidenceUrl ?? source.sourceUrl
+                source.evidenceKind === "observed_site_problem"
+                  ? source.sourceUrl
+                  : (source.evidenceUrl ?? source.sourceUrl)
               ),
               employerName:
                 typeof source.employerName === "string"
@@ -151,7 +153,18 @@ export function normalizeProspectProfileData(
                 typeof source.supportingQuote === "string"
                   ? source.supportingQuote
                   : undefined,
+              evidenceUrl: getPublicEvidenceUrl(source.evidenceUrl),
+              httpStatus:
+                source.httpStatus === 404 || source.httpStatus === 410
+                  ? source.httpStatus
+                  : undefined,
+              observedAt:
+                typeof source.observedAt === "string" &&
+                Number.isFinite(Date.parse(source.observedAt))
+                  ? source.observedAt
+                  : undefined,
               publishedAt:
+                source.evidenceKind !== "observed_site_problem" &&
                 typeof source.publishedAt === "string" &&
                 Number.isFinite(Date.parse(source.publishedAt))
                   ? source.publishedAt
@@ -162,7 +175,7 @@ export function normalizeProspectProfileData(
                 source.verifiedAt > 0
                   ? source.verifiedAt
                   : undefined,
-              sourcePost: isEmployerEventEvidence(source)
+              sourcePost: isCompanyContextEvidence(source)
                 ? undefined
                 : ((sourceId ? evidencePostsById.get(sourceId) : undefined) ??
                   resolveEvidencePost(source.sourcePost)),

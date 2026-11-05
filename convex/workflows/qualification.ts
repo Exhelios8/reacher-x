@@ -10,7 +10,11 @@ import { getQualificationPool } from "../lib/qualificationPool";
 import { previewQualificationPool } from "../lib/previewQualificationPool";
 import { QUALIFICATION_THRESHOLD } from "../lib/qualificationCore";
 import { evaluateQualificationWithExternalArticles } from "../lib/qualificationEvaluationCore";
-import { indexEvidencePosts, type EvidencePost } from "../lib/ragIndexing";
+import {
+  indexEvidencePosts,
+  projectQualificationEvidenceForRag,
+  type EvidencePost,
+} from "../lib/ragIndexing";
 import {
   prospectPlatformValidator,
   workspaceTargetingSpecValidator,
@@ -31,6 +35,7 @@ import {
   isAiCreditExhaustionError,
   shouldRecoverQualificationWorkflowStatusError,
   QUALIFICATION_MODEL_FAILURE_CODE,
+  REQUIRED_PROBLEM_SOURCE_UNAVAILABLE,
 } from "../lib/qualificationFailureCore";
 import { TENANT_JOB_PRIORITY } from "../lib/tenantSchedulerCore";
 import { enqueueTenantJobWithRetry } from "../lib/tenantSchedulerEnqueue";
@@ -142,7 +147,16 @@ export const indexQualificationEvidence = internalAction({
         text: v.string(),
         url: v.optional(v.string()),
         platform: prospectPlatformValidator,
-        evidenceKind: v.optional(v.literal("employer_event")),
+        evidenceKind: v.optional(
+          v.union(
+            v.literal("employer_event"),
+            v.literal("observed_site_problem")
+          )
+        ),
+        observedAt: v.optional(v.string()),
+        verifiedAt: v.optional(v.number()),
+        targetUrl: v.optional(v.string()),
+        httpStatus: v.optional(v.union(v.literal(404), v.literal(410))),
         employerName: v.optional(v.string()),
         publishedAt: v.optional(v.string()),
       })
@@ -639,19 +653,10 @@ export const qualificationWorkflow = workflow.define({
       const platform = (currentProspect.platform || "twitter") as
         | "twitter"
         | "linkedin";
-      const evidenceForRag = result.qualificationSources.map((source) => ({
-        id: source.sourceId,
-        text: source.text,
-        url: source.evidenceUrl ?? source.sourceUrl,
-        platform,
-        ...(source.evidenceKind === "employer_event"
-          ? {
-              evidenceKind: "employer_event" as const,
-              employerName: source.employerName,
-              publishedAt: source.publishedAt,
-            }
-          : {}),
-      }));
+      const evidenceForRag = projectQualificationEvidenceForRag(
+        result.qualificationSources,
+        platform
+      );
 
       // Index evidence posts to RAG (fire and forget, don't block workflow)
       if (!isStillSetupPreview) {
@@ -876,6 +881,9 @@ export const handleQualificationComplete = internalMutation({
     const now = getCurrentUTCTimestamp();
     if (args.result.kind === "failed") {
       const modelFailure = parseQualificationModelFailure(args.result.error);
+      const problemSourceUnavailable = args.result.error.includes(
+        REQUIRED_PROBLEM_SOURCE_UNAVAILABLE
+      );
       const previousWorkflowAttemptCount =
         prospect.qualificationLastFailure?.workflowAttemptCount ?? 0;
       const workflowAttemptCount = previousWorkflowAttemptCount + 1;
@@ -884,12 +892,20 @@ export const handleQualificationComplete = internalMutation({
       await ctx.db.patch(prospect._id, {
         qualificationWorkflowId: undefined,
         qualificationLastFailure: {
-          stage: modelFailure ? "model_evaluation" : "workflow",
-          provider: modelFailure?.provider ?? "convex_workflow",
+          stage: problemSourceUnavailable
+            ? "evidence_fetch"
+            : modelFailure
+              ? "model_evaluation"
+              : "workflow",
+          provider: problemSourceUnavailable
+            ? "qualification_evidence"
+            : (modelFailure?.provider ?? "convex_workflow"),
           model: modelFailure?.model,
-          code: modelFailure
-            ? QUALIFICATION_MODEL_FAILURE_CODE
-            : "qualification_workflow_failed",
+          code: problemSourceUnavailable
+            ? "qualification_evidence_fetch_failed"
+            : modelFailure
+              ? QUALIFICATION_MODEL_FAILURE_CODE
+              : "qualification_workflow_failed",
           message: modelFailure?.message ?? args.result.error,
           attemptCount: modelFailure?.attemptCount,
           workflowAttemptCount,

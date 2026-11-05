@@ -13,6 +13,7 @@ import {
 } from "../agents/outreach/rag";
 import type { Doc } from "../_generated/dataModel";
 import { EvidencePost } from "./enrichmentCore";
+import type { QualificationSource } from "./qualificationEvidenceCore";
 import { buildProspectSummaryRecord } from "./readModelHelpers";
 import {
   buildContentHashFromText,
@@ -135,6 +136,37 @@ function getRagIndexErrorDetails(error: unknown): {
  * @param prospectId - Prospect ID for namespace
  * @param posts - Evidence posts to index
  */
+export function projectQualificationEvidenceForRag(
+  sources: QualificationSource[],
+  platform: EvidencePost["platform"]
+): EvidencePost[] {
+  return sources.map((source) => ({
+    id: source.sourceId,
+    text: source.text,
+    url:
+      source.evidenceKind === "observed_site_problem"
+        ? source.sourceUrl
+        : (source.evidenceUrl ?? source.sourceUrl),
+    platform,
+    ...(source.evidenceKind === "employer_event"
+      ? {
+          evidenceKind: "employer_event" as const,
+          employerName: source.employerName,
+          publishedAt: source.publishedAt,
+        }
+      : source.evidenceKind === "observed_site_problem"
+        ? {
+            evidenceKind: "observed_site_problem" as const,
+            employerName: source.employerName,
+            observedAt: source.observedAt,
+            verifiedAt: source.verifiedAt,
+            targetUrl: source.evidenceUrl,
+            httpStatus: source.httpStatus,
+          }
+        : {}),
+  }));
+}
+
 export async function indexEvidencePosts(
   ctx: ActionCtx,
   prospectId: string,
@@ -154,9 +186,11 @@ export async function indexEvidencePosts(
 
     try {
       const text =
-        post.evidenceKind === "employer_event"
-          ? `Official employer event: ${post.employerName ?? "verified employer"}. Company context, not a personal post; no individual buying intent, budget or authority is established.\nPublished: ${post.publishedAt ?? "unknown"}\nSource: ${post.url ?? "unknown"}\n${post.text}`
-          : post.text;
+        post.evidenceKind === "observed_site_problem"
+          ? `Independent website observation by ReacherX for ${post.employerName ?? "verified employer"}. Not a personal post or company-authored announcement; no role, buying intent, budget or financial fact is established. No social reply or action is supported.\nObserved: ${post.observedAt ?? "unknown"}\nVerified at: ${post.verifiedAt ? new Date(post.verifiedAt).toISOString() : "unknown"}\nOfficial linking page: ${post.url ?? "unknown"}\nLinked destination: ${post.targetUrl ?? "unknown"}\nConfirmed HTTP: ${post.httpStatus ?? "unknown"} (two GET requests)\n${post.text}`
+          : post.evidenceKind === "employer_event"
+            ? `Official employer event: ${post.employerName ?? "verified employer"}. Company context, not a personal post; no individual buying intent, budget or authority is established.\nPublished: ${post.publishedAt ?? "unknown"}\nSource: ${post.url ?? "unknown"}\n${post.text}`
+            : post.text;
       const contentHash = buildContentHashFromText(text);
       await getProspectRag().add(ctx, {
         namespace,
@@ -164,15 +198,17 @@ export async function indexEvidencePosts(
         text,
         contentHash,
         metadata:
-          post.evidenceKind === "employer_event"
-            ? { source: post.url, type: "employer_event" }
+          post.evidenceKind === "employer_event" ||
+          post.evidenceKind === "observed_site_problem"
+            ? { source: post.url, type: post.evidenceKind }
             : undefined,
         filterValues: [
           {
             name: "contentType",
             value:
-              post.evidenceKind === "employer_event"
-                ? "employer_event"
+              post.evidenceKind === "employer_event" ||
+              post.evidenceKind === "observed_site_problem"
+                ? post.evidenceKind
                 : "evidence_post",
           },
         ],

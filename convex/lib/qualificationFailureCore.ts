@@ -1,4 +1,6 @@
 const MODEL_FAILURE_PREFIX = "[QUALIFICATION_MODEL_EVALUATION_FAILED]";
+export const REQUIRED_PROBLEM_SOURCE_UNAVAILABLE =
+  "[QualificationEvidence] A required problem source is temporarily unavailable";
 
 export const QUALIFICATION_MODEL_FAILURE_CODE =
   "qualification_model_evaluation_failed";

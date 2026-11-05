@@ -4,9 +4,64 @@ import {
   getAllowedDiscoveryStages,
   getStricterDiscoveryStage,
   normalizeWorkspaceTargetingSpec,
+  preserveRequiredProblemCriterion,
   shouldUseLinkedInPeopleDiscovery,
   type WorkspaceTargetingSpec,
 } from "./targetingSpecCore";
+
+test("profile refresh preserves an operator's required problem and the people search surface", () => {
+  const generated = exampleSpec();
+  const need = {
+    ...generated.criteria[0],
+    id: "need",
+    kind: "required",
+    category: "intent",
+    evidence: "either",
+    requiresProblemEvidence: true,
+  } as const;
+  const previous = normalizeWorkspaceTargetingSpec({
+    ...generated,
+    criteria: [need],
+  });
+  expect(preserveRequiredProblemCriterion(generated)).toBe(generated);
+  expect(
+    preserveRequiredProblemCriterion(generated, previous).criteria
+  ).toContainEqual(need);
+  const downgraded = {
+    ...generated,
+    criteria: [{ ...need, kind: "preferred" as const }, ...generated.criteria],
+  };
+  expect(
+    preserveRequiredProblemCriterion(downgraded, previous).criteria[0]
+  ).toEqual(need);
+  expect(shouldUseLinkedInPeopleDiscovery(previous)).toBe(true);
+});
+
+test("rejects a marked need with weaker targeting and prevents an unrelated role criterion from using company proof", () => {
+  const spec = exampleSpec();
+  const marked = {
+    ...spec.criteria[0],
+    id: "need",
+    requiresProblemEvidence: true as const,
+  };
+  expect(() =>
+    normalizeWorkspaceTargetingSpec({ ...spec, criteria: [marked] })
+  ).toThrow("requiresProblemEvidence");
+  expect(() =>
+    normalizeWorkspaceTargetingSpec({
+      ...spec,
+      criteria: [
+        {
+          ...marked,
+          id: "role",
+          kind: "required",
+          category: "intent",
+          evidence: "either",
+        },
+      ],
+    })
+  ).toThrow("requiresProblemEvidence");
+});
 
 function exampleSpec(): WorkspaceTargetingSpec {
   return {

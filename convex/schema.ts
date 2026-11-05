@@ -963,6 +963,7 @@ export default defineSchema({
     reasoning: v.string(),
     matchReasoning: v.optional(v.string()),
     error: v.optional(v.string()),
+    failure: v.optional(qualificationFailureValidator),
     qualificationSources: v.array(qualificationSourceValidator),
     qualificationVerification: v.optional(qualificationVerificationValidator),
     authenticity: v.optional(qualificationAuthenticityValidator),

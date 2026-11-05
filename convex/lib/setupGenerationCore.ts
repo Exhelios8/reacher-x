@@ -15,6 +15,7 @@ import {
 import { extractUsage, getRoutingTelemetry, robustGenerateObject } from "./ai";
 import {
   normalizeWorkspaceTargetingSpec,
+  preserveRequiredProblemCriterion,
   type WorkspaceTargetingSpec,
 } from "./targetingSpecCore";
 
@@ -363,7 +364,10 @@ ${JSON.stringify(args.currentTargetingSpec ?? null)}`,
     temperature: 0.2,
     maxRetries: 2,
   });
-  return normalizeWorkspaceTargetingSpec(object);
+  return preserveRequiredProblemCriterion(
+    normalizeWorkspaceTargetingSpec(object),
+    args.currentTargetingSpec
+  );
 }
 
 /**

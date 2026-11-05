@@ -47,7 +47,11 @@ export interface EvidencePost {
   text: string;
   url?: string;
   platform: "twitter" | "linkedin";
-  evidenceKind?: "employer_event";
+  evidenceKind?: "employer_event" | "observed_site_problem";
+  observedAt?: string;
+  verifiedAt?: number;
+  targetUrl?: string;
+  httpStatus?: 404 | 410;
   employerName?: string;
   publishedAt?: string;
   /**
@@ -134,9 +138,20 @@ export function convertToEvidencePosts(
     url: getWorkflowEvidencePostUrl(p),
     platform,
     evidenceKind:
-      p.evidenceKind === "employer_event" ? "employer_event" : undefined,
+      p.evidenceKind === "employer_event" ||
+      p.evidenceKind === "observed_site_problem"
+        ? p.evidenceKind
+        : undefined,
     employerName: getStringProperty(p, "employerName"),
-    publishedAt: getStringProperty(p, "publishedAt"),
+    publishedAt:
+      p.evidenceKind === "observed_site_problem"
+        ? undefined
+        : getStringProperty(p, "publishedAt"),
+    observedAt: getStringProperty(p, "observedAt"),
+    verifiedAt: typeof p.verifiedAt === "number" ? p.verifiedAt : undefined,
+    targetUrl: getStringProperty(p, "targetUrl"),
+    httpStatus:
+      p.httpStatus === 404 || p.httpStatus === 410 ? p.httpStatus : undefined,
     raw: p,
   }));
 }

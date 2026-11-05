@@ -7,6 +7,10 @@ import {
 } from "./qualificationDiscoveryEvidenceCore";
 import { prepareQualificationCandidates } from "./qualificationEvidenceCore";
 import { readWebPages, searchWeb } from "./researchCore";
+import {
+  observeOfficialSiteProblem,
+  QualificationSiteProblemRetryableError,
+} from "./qualificationSiteProblemCore";
 import { getLearningTargetingFingerprint } from "./learningTargetingHelpers";
 import { buildLegacyWorkspaceTargetingSpec } from "./targetingSpecCore";
 
@@ -14,10 +18,17 @@ vi.mock("./researchCore", () => ({
   readWebPages: vi.fn(),
   searchWeb: vi.fn(),
 }));
+vi.mock("./qualificationSiteProblemCore", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./qualificationSiteProblemCore")>()),
+  observeOfficialSiteProblem: vi.fn(),
+}));
 beforeEach(() => {
   vi.stubEnv("ACCOUNT_FIRST_DISCOVERY_WORKSPACE_IDS", "workspace");
   vi.mocked(readWebPages).mockReset().mockResolvedValue([]);
   vi.mocked(searchWeb).mockReset().mockResolvedValue([]);
+  vi.mocked(observeOfficialSiteProblem)
+    .mockReset()
+    .mockResolvedValue(undefined);
 });
 afterEach(() => vi.unstubAllEnvs());
 
@@ -648,71 +659,87 @@ describe("verified current employer context", () => {
     }
   );
 
-  test("scopes one bounded event search to the verified employer and reads dated official sources separately", async () => {
-    const mock = context();
-    const targetingSpec = buildLegacyWorkspaceTargetingSpec({
-      description: "Find educators migrating learning catalogues",
-      profiles: [],
-    });
-    vi.mocked(mock.ctx.runQuery).mockResolvedValue({
-      description: targetingSpec.summary,
-      targetingSpec,
-      icps: [],
-    });
-    mock.runAction
-      .mockReset()
-      .mockResolvedValueOnce({ success: true, profile: employerProfile })
-      .mockResolvedValueOnce({ success: true, company });
-    const publishedDate = new Date(Date.now() - 86_400_000).toISOString();
-    const url = `${company.website}/news/catalogue-migration`;
-    vi.mocked(searchWeb).mockResolvedValue([
-      {
-        url,
-        title: "Catalogue migration",
-        snippet: "Search excerpt is not the source",
-        publishedDate,
-      },
-    ]);
-    vi.mocked(readWebPages)
-      .mockResolvedValueOnce([])
-      .mockResolvedValueOnce([
+  test.each([false, true])(
+    "scopes one bounded event search to the verified employer, with only a required problem criterion: %s",
+    async (requiredOnly) => {
+      const mock = context();
+      const targetingSpec = buildLegacyWorkspaceTargetingSpec({
+        description: "Find educators migrating learning catalogues",
+        profiles: [],
+      });
+      if (requiredOnly) {
+        targetingSpec.criteria = [
+          {
+            ...targetingSpec.criteria[0],
+            id: "need",
+            kind: "required",
+            category: "intent",
+            evidence: "either",
+            requiresProblemEvidence: true,
+            description: "Find educators with unresolved catalogue migrations",
+          },
+        ];
+      }
+      vi.mocked(mock.ctx.runQuery).mockResolvedValue({
+        description: targetingSpec.summary,
+        targetingSpec,
+        icps: [],
+      });
+      mock.runAction
+        .mockReset()
+        .mockResolvedValueOnce({ success: true, profile: employerProfile })
+        .mockResolvedValueOnce({ success: true, company });
+      const publishedDate = new Date(Date.now() - 86_400_000).toISOString();
+      const url = `${company.website}/news/catalogue-migration`;
+      vi.mocked(searchWeb).mockResolvedValue([
         {
           url,
-          finalUrl: url,
           title: "Catalogue migration",
-          snippet: "Courses is migrating its learning catalogue.",
+          snippet: "Search excerpt is not the source",
           publishedDate,
         },
       ]);
-    const result = await collectQualificationDiscoveryEvidence(
-      mock.ctx,
-      socialProspect
-    );
-    expect(searchWeb).toHaveBeenCalledExactlyOnceWith(
-      expect.stringContaining("educators"),
-      expect.objectContaining({ consumer: "qualification.employer_events" }),
-      expect.objectContaining({
-        includeDomains: ["courses.example"],
-        maxResults: 2,
-        startPublishedDate: expect.any(String),
-      })
-    );
-    expect(result?.evidencePosts).toEqual([]);
-    expect(result?.profileData.employerEvidence).toMatchObject({
-      events: [
-        {
-          companyId: "42",
-          url,
-          finalUrl: url,
-          publishedAt: publishedDate,
-          text: "Courses is migrating its learning catalogue.",
-        },
-      ],
-    });
-    expect(getQualificationProfileText(result!.profileData)).not.toContain(
-      "migrating"
-    );
-  });
+      vi.mocked(readWebPages)
+        .mockResolvedValueOnce([])
+        .mockResolvedValueOnce([
+          {
+            url,
+            finalUrl: url,
+            title: "Catalogue migration",
+            snippet: "Courses is migrating its learning catalogue.",
+            publishedDate,
+          },
+        ]);
+      const result = await collectQualificationDiscoveryEvidence(
+        mock.ctx,
+        socialProspect
+      );
+      expect(searchWeb).toHaveBeenCalledExactlyOnceWith(
+        expect.stringContaining("educators"),
+        expect.objectContaining({ consumer: "qualification.employer_events" }),
+        expect.objectContaining({
+          includeDomains: ["courses.example"],
+          maxResults: 2,
+          startPublishedDate: expect.any(String),
+        })
+      );
+      expect(result?.evidencePosts).toEqual([]);
+      expect(result?.profileData.employerEvidence).toMatchObject({
+        events: [
+          {
+            companyId: "42",
+            url,
+            finalUrl: url,
+            publishedAt: publishedDate,
+            text: "Courses is migrating its learning catalogue.",
+          },
+        ],
+      });
+      expect(getQualificationProfileText(result!.profileData)).not.toContain(
+        "migrating"
+      );
+    }
+  );
 
   test.each([
     { finalUrl: "https://unrelated.example/news" },
@@ -760,6 +787,90 @@ describe("verified current employer context", () => {
       expect(result?.profileData.employerEvidence).toMatchObject({
         events: [],
       });
+    }
+  );
+
+  test.each([
+    { enabled: true, problem: true, retryable: false },
+    { enabled: false, problem: true, retryable: false },
+    { enabled: true, problem: false, retryable: false },
+    { enabled: true, problem: true, retryable: true },
+  ])(
+    "observes a site problem only for the opt-in required problem gate: %j",
+    async ({ enabled, problem, retryable }) => {
+      vi.stubEnv(
+        "ACCOUNT_FIRST_DISCOVERY_WORKSPACE_IDS",
+        enabled ? "workspace" : "other-workspace"
+      );
+      const mock = context();
+      const targetingSpec = buildLegacyWorkspaceTargetingSpec({
+        description: "Find unresolved product documentation paths",
+        profiles: [],
+      });
+      targetingSpec.criteria = [
+        {
+          ...targetingSpec.criteria[0],
+          id: "need",
+          kind: problem ? "required" : "preferred",
+          category: "intent",
+          evidence: "either",
+          ...(problem ? { requiresProblemEvidence: true as const } : {}),
+        },
+      ];
+      vi.mocked(mock.ctx.runQuery).mockResolvedValue({
+        description: targetingSpec.summary,
+        targetingSpec,
+        icps: [],
+      });
+      mock.runAction
+        .mockReset()
+        .mockResolvedValueOnce({ success: true, profile: employerProfile })
+        .mockResolvedValueOnce({ success: true, company });
+      const observation = {
+        evidenceKind: "observed_site_problem" as const,
+        companyId: "42",
+        url: company.website,
+        finalUrl: company.website,
+        targetUrl: `${company.website}/docs/product`,
+        anchorText: "Product documentation",
+        httpStatus: 404 as const,
+        observedAt: new Date().toISOString(),
+        text: "Machine observation of two HTTP404 responses.",
+      };
+      vi.mocked(observeOfficialSiteProblem).mockResolvedValue(observation);
+      if (retryable)
+        vi.mocked(observeOfficialSiteProblem).mockRejectedValue(
+          new QualificationSiteProblemRetryableError()
+        );
+      const result = await collectQualificationDiscoveryEvidence(
+        mock.ctx,
+        socialProspect
+      );
+      expect(result?.evidencePosts).toEqual([]);
+      if (enabled && problem) {
+        expect(observeOfficialSiteProblem).toHaveBeenCalledExactlyOnceWith({
+          companyId: "42",
+          officialWebsite: company.website,
+          sourceUrl: company.website,
+        });
+        expect(result?.profileData.qualificationContextVersion).toBe(4);
+        expect(result?.profileData.employerEvidence).toMatchObject({
+          siteProblems: retryable ? [] : [observation],
+        });
+        expect(getQualificationProfileText(result!.profileData)).not.toContain(
+          observation.text
+        );
+        if (retryable)
+          expect(result?.profileData.employerEvidence).toMatchObject({
+            siteProblemFetchRetryable: true,
+            siteProblemRetryAfter: expect.any(Number),
+          });
+      } else {
+        expect(observeOfficialSiteProblem).not.toHaveBeenCalled();
+        expect(result?.profileData.employerEvidence).not.toHaveProperty(
+          "siteProblems"
+        );
+      }
     }
   );
 
