@@ -219,6 +219,7 @@ import type * as lib_qualificationEvidenceCore from "../lib/qualificationEvidenc
 import type * as lib_qualificationFailureCore from "../lib/qualificationFailureCore.js";
 import type * as lib_qualificationPool from "../lib/qualificationPool.js";
 import type * as lib_qualificationScoringCore from "../lib/qualificationScoringCore.js";
+import type * as lib_qualificationSiteProblemCore from "../lib/qualificationSiteProblemCore.js";
 import type * as lib_queryPrioritizationCore from "../lib/queryPrioritizationCore.js";
 import type * as lib_ragIndexing from "../lib/ragIndexing.js";
 import type * as lib_ragSearchHelpers from "../lib/ragSearchHelpers.js";
@@ -627,6 +628,7 @@ declare const fullApi: ApiFromModules<{
   "lib/qualificationFailureCore": typeof lib_qualificationFailureCore;
   "lib/qualificationPool": typeof lib_qualificationPool;
   "lib/qualificationScoringCore": typeof lib_qualificationScoringCore;
+  "lib/qualificationSiteProblemCore": typeof lib_qualificationSiteProblemCore;
   "lib/queryPrioritizationCore": typeof lib_queryPrioritizationCore;
   "lib/ragIndexing": typeof lib_ragIndexing;
   "lib/ragSearchHelpers": typeof lib_ragSearchHelpers;
