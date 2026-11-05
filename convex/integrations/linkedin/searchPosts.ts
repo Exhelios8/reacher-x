@@ -18,6 +18,7 @@ import {
   getNextLinkedInPostsSearchStart,
   LINKEDIN_POSTS_DEFAULT_PAGE_SIZE,
   LINKEDIN_POSTS_MAX_PAGES_PER_QUERY,
+  LINKEDIN_ACCOUNT_FIRST_LIMITS,
   normalizeLinkedInPostAuthorJobTitle,
 } from "../../lib/linkedinSearchHelpers";
 import {
@@ -257,6 +258,7 @@ async function collectPaginatedPostResults(
     datePosted?: "past-24h" | "past-week" | "past-month" | "past-year";
     authorJobTitle?: string;
     initialResult: InternalSearchResult;
+    maxPages?: number;
   }
 ): Promise<InternalSearchResult> {
   const posts = [...args.initialResult.posts];
@@ -269,7 +271,7 @@ async function collectPaginatedPostResults(
 
   for (
     let pageIndex = 1;
-    pageIndex < LINKEDIN_POSTS_MAX_PAGES_PER_QUERY;
+    pageIndex < (args.maxPages ?? LINKEDIN_POSTS_MAX_PAGES_PER_QUERY);
     pageIndex += 1
   ) {
     if (!lastResult.hasMore || seenStarts.has(nextStart)) {
@@ -584,6 +586,7 @@ export const searchBatch = action({
     datePosted: v.optional(linkedinTimeFilterValidator),
     authorJobTitle: v.optional(v.string()),
     maxQueriesPerBatch: v.optional(v.number()),
+    accountFirstDiscovery: v.optional(v.boolean()),
   },
   handler: async (ctx, args): Promise<BatchSearchResult> => {
     const startTime = getCurrentUTCTimestamp();
@@ -593,7 +596,18 @@ export const searchBatch = action({
       args.authorJobTitle
     );
 
-    const maxQueries = args.maxQueriesPerBatch ?? 20;
+    const maxQueries = args.accountFirstDiscovery
+      ? Math.max(
+          0,
+          Math.min(
+            Math.floor(
+              args.maxQueriesPerBatch ??
+                LINKEDIN_ACCOUNT_FIRST_LIMITS.postQueries
+            ),
+            LINKEDIN_ACCOUNT_FIRST_LIMITS.postQueries
+          )
+        )
+      : (args.maxQueriesPerBatch ?? 20);
     const queriesToExecute = uniqueQueries.slice(0, maxQueries);
 
     if (queriesToExecute.length === 0) {
@@ -646,7 +660,7 @@ export const searchBatch = action({
         },
       ];
 
-      if (args.datePosted === undefined) {
+      if (args.datePosted === undefined && !args.accountFirstDiscovery) {
         baseAttempts.push({
           query,
           searchMode: "plain_date",
@@ -654,7 +668,7 @@ export const searchBatch = action({
         });
       }
 
-      if (shouldUseExactPhraseFallback(query)) {
+      if (!args.accountFirstDiscovery && shouldUseExactPhraseFallback(query)) {
         baseAttempts.push({
           query: buildExactPhraseQuery(query),
           searchMode: "exact_phrase",
@@ -670,13 +684,15 @@ export const searchBatch = action({
         datePosted?: "past-24h" | "past-week" | "past-month" | "past-year";
         authorJobTitle?: string;
       }> = authorJobTitle
-        ? [
-            ...baseAttempts.map((attempt) => ({
-              ...attempt,
-              authorJobTitle,
-            })),
-            ...baseAttempts,
-          ]
+        ? args.accountFirstDiscovery
+          ? baseAttempts.map((attempt) => ({ ...attempt, authorJobTitle }))
+          : [
+              ...baseAttempts.map((attempt) => ({
+                ...attempt,
+                authorJobTitle,
+              })),
+              ...baseAttempts,
+            ]
         : baseAttempts;
 
       const runIdPromise = new Promise<RunId>((resolve, reject) => {
@@ -783,13 +799,25 @@ export const searchBatch = action({
               datePosted: attempt.datePosted,
               authorJobTitle: attempt.authorJobTitle,
               initialResult,
+              maxPages: args.accountFirstDiscovery
+                ? LINKEDIN_ACCOUNT_FIRST_LIMITS.pagesPerQuery
+                : undefined,
             });
           } catch (error) {
             finalError =
               error instanceof Error ? error.message : "Unknown error";
           }
 
-          if (result && result.success && result.posts.length > 0) {
+          if (result && args.accountFirstDiscovery)
+            result = {
+              ...result,
+              posts: result.posts.slice(0, LINKEDIN_POSTS_DEFAULT_PAGE_SIZE),
+            };
+          if (
+            result &&
+            result.success &&
+            (result.posts.length > 0 || args.accountFirstDiscovery)
+          ) {
             allPosts.push(...result.posts);
             totalPostsFound += result.posts.length;
             queriesSucceeded++;

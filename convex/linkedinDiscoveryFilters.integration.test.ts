@@ -1,4 +1,4 @@
-import { describe, expect, test, vi } from "vitest";
+import { afterEach, describe, expect, test, vi } from "vitest";
 import {
   getFunctionName,
   type FunctionArgs,
@@ -22,6 +22,7 @@ const handler = (
     _handler: (ctx: ActionCtx, args: Args) => Promise<Result>;
   }
 )._handler;
+afterEach(() => vi.unstubAllEnvs());
 
 async function execute(applyProviderFilters?: boolean) {
   const calls: Array<{ name: string; args: Record<string, unknown> }> = [];
@@ -105,4 +106,105 @@ describe("LinkedIn discovery stages at the provider boundary", () => {
       ])
         expect(call.args[key]).toBeUndefined();
   });
+});
+
+async function executeAccountFirst(peopleFail = false) {
+  vi.stubEnv("ACCOUNT_FIRST_DISCOVERY_WORKSPACE_IDS", "workspace");
+  const calls: Array<{ name: string; args: Record<string, unknown> }> = [];
+  const workspace = {
+    userId: "test-user",
+    name: "QA",
+    targetingSpec: {
+      searchFilters: {
+        linkedinPosts: { datePosted: "past-year" },
+        linkedinPeople: { location: "France", profileLanguage: "fr" },
+      },
+    },
+  };
+  const ctx = {
+    runQuery: vi.fn(
+      async (
+        ref: Parameters<typeof getFunctionName>[0],
+        args: Record<string, unknown>
+      ) => {
+        if (getFunctionName(ref) === "keywords:getPrioritizedLinkedInQueries") {
+          const eligible =
+            args.surface === "people"
+              ? "Acme directeur marketing"
+              : "refonte site";
+          return (args.restrictToQueries as string[]).includes(eligible)
+            ? [{ value: eligible }]
+            : [];
+        }
+        return workspace;
+      }
+    ),
+    runAction: async (
+      ref: Parameters<typeof getFunctionName>[0],
+      args: Record<string, unknown>
+    ) => {
+      const name = getFunctionName(ref);
+      calls.push({ name, args });
+      if (peopleFail && name.includes("searchPeople"))
+        throw new Error("People provider unavailable");
+      const queries = args.queries as string[];
+      return {
+        success: true,
+        people: [],
+        posts: [],
+        matchedQueriesByPostId: {},
+        matchedQueriesByPersonUrn: {},
+        errors: [],
+        queryStats: queries.map((query) => ({
+          query,
+          success: true,
+          postsFound: 0,
+          peopleFound: 0,
+        })),
+      };
+    },
+  };
+  const result = await handler(ctx as unknown as ActionCtx, {
+    workspaceId: "workspace" as Id<"workspaces">,
+    postQueries: ["conseils marketing", "refonte site", "migration catalogue"],
+    peopleQueries: ["CEO", "Acme directeur marketing", "marketing manager"],
+    relaxedQueries: ["Acme directeur marketing", "refonte site"],
+    applyProviderFilters: false,
+  });
+  return { calls, result };
+}
+
+test("account-first action rechecks named eligibility and preserves filters despite a relaxed flag", async () => {
+  const { calls, result } = await executeAccountFirst();
+  expect(result.success).toBe(true);
+  expect(calls).toHaveLength(2);
+  const people = calls.find((call) => call.name.includes("searchPeople"))!;
+  const posts = calls.find((call) => call.name.includes("searchPosts"))!;
+  expect(people.args).toMatchObject({
+    queries: ["Acme directeur marketing"],
+    count: 10,
+    location: "France",
+    profileLanguage: "fr",
+    accountFirstDiscovery: true,
+  });
+  expect(posts.args).toMatchObject({
+    queries: ["refonte site"],
+    sortBy: "date_posted",
+    datePosted: "past-month",
+    accountFirstDiscovery: true,
+  });
+  expect(result.postQueryStats).toHaveLength(1);
+  expect(result.peopleQueryStats).toHaveLength(1);
+});
+
+test("a people provider failure preserves the completed post-search result", async () => {
+  const { result } = await executeAccountFirst(true);
+  expect(result.success).toBe(false);
+  expect(result.postQueryStats).toMatchObject([
+    { query: "refonte site", success: true },
+  ]);
+  expect(result.peopleQueryStats).toMatchObject([
+    { query: "Acme directeur marketing", success: false },
+  ]);
+  expect(result.error).toContain("People provider unavailable");
 });

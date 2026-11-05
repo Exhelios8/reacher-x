@@ -1,12 +1,14 @@
 import { afterEach, expect, test, vi } from "vitest";
 import {
   ACCOUNT_RESEARCH_LOOKBACK_MS,
+  buildAccountResearchQueries,
   groundAccountQuery,
   isAccountFirstDiscoveryEnabled,
   isAccountResearchHintFromFindings,
   isFreshAccountResearchHint,
   selectRecentAccountFindings,
 } from "./accountFirstDiscoveryCore";
+import { buildLegacyWorkspaceTargetingSpec } from "./targetingSpecCore";
 
 const now = Date.parse("2026-11-05T12:00:00Z");
 const finding = {
@@ -16,6 +18,44 @@ const finding = {
   snippet: "Acme annonce une nouvelle usine en France.",
 };
 afterEach(() => vi.unstubAllEnvs());
+
+test("account lookups rotate compact supplied work topics in the target language", () => {
+  const spec = buildLegacyWorkspaceTargetingSpec({
+    description: "French commercial companies",
+    profiles: [],
+  });
+  const topics = [
+    "migration documentation API",
+    "pages catégories",
+    "nouvelle gamme catalogue",
+    "nouvelle offre conseil",
+  ];
+  spec.searchHints.activityPhrases = topics;
+  spec.searchHints.languageCodes = ["fr", "en"];
+  spec.searchFilters!.linkedinPeople.location = "France";
+  const args = { targetingSpec: spec, keywords: ["current pages"], now };
+  const first = buildAccountResearchQueries(args);
+  const next = buildAccountResearchQueries({
+    ...args,
+    now: now + 5 * 60 * 1000,
+  });
+  expect(first).toHaveLength(2);
+  expect(new Set([...first, ...next]).size).toBe(4);
+  expect(
+    first.every((query) => topics.some((topic) => query.startsWith(topic)))
+  ).toBe(true);
+  expect(
+    first.every(
+      (query) =>
+        query.endsWith("France actualités entreprise site officiel") &&
+        query.length < 220
+    )
+  ).toBe(true);
+  expect(first.join(" ")).not.toMatch(
+    /hiring|investment|launch|fundrais|criteria|budget/
+  );
+  expect(buildAccountResearchQueries({ keywords: [], now })).toEqual([]);
+});
 
 test("account research is disabled by default and allows only exact workspace IDs", () => {
   vi.stubEnv("ACCOUNT_FIRST_DISCOVERY_WORKSPACE_IDS", "");

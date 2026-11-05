@@ -12,6 +12,12 @@ export const LINKEDIN_PEOPLE_MAX_PAGES_PER_QUERY = 3;
 
 export const LINKEDIN_POSTS_DEFAULT_PAGE_SIZE = 10;
 export const LINKEDIN_POSTS_MAX_PAGES_PER_QUERY = 3;
+export const LINKEDIN_ACCOUNT_FIRST_LIMITS = {
+  peopleQueries: 2,
+  peoplePerQuery: 10,
+  postQueries: 1,
+  pagesPerQuery: 1,
+} as const;
 export const LINKEDIN_PROSPECT_SAVE_BATCH_SIZE =
   PROSPECT_WRITE_TRANSACTION_BATCH_SIZE;
 

@@ -21,7 +21,7 @@ import { isRecord } from "../lib/typeGuards";
 import { searchWeb, type ResearchFinding } from "../lib/researchCore";
 import {
   ACCOUNT_RESEARCH_LOOKBACK_MS,
-  buildAccountResearchQuery,
+  buildAccountResearchQueries,
   groundAccountQuery,
   isAccountFirstDiscoveryEnabled,
   isAccountResearchHintFromFindings,
@@ -979,6 +979,12 @@ export const convertToSocialQueriesAction = internalAction({
     const includeLinkedIn = args.platforms.includes("linkedin");
     const includeLinkedInPeople =
       includeLinkedIn && shouldUseLinkedInPeopleDiscovery(args.targetingSpec);
+    const discoveryContext = args.workspaceId
+      ? ((await ctx.runQuery(
+          internal.memory.getDiscoveryGenerationContextInternal,
+          { workspaceId: args.workspaceId }
+        )) as DiscoveryGenerationContext)
+      : null;
     let accountResearchHints: ResearchFinding[] = [];
     if (
       includeLinkedInPeople &&
@@ -986,24 +992,40 @@ export const convertToSocialQueriesAction = internalAction({
       isAccountFirstDiscoveryEnabled(args.workspaceId)
     ) {
       let timeout: ReturnType<typeof setTimeout> | undefined;
+      let searchCount = 0;
+      const deadline = getCurrentUTCTimestamp() + 12_000;
+      const researchQueries = buildAccountResearchQueries({
+        ...args,
+        now: startTime,
+      });
+      const collectedFindings: ResearchFinding[] = [];
       try {
         // shortcut: deadline cannot cancel Exa billing; use SDK abort support when available.
-        const findings = await Promise.race([
-          searchWeb(
-            buildAccountResearchQuery({ ...args, now: startTime }),
-            {
-              ctx,
-              workspaceId: args.workspaceId,
-              consumer: "account-first-discovery",
-            },
-            {
-              maxResults: 4,
-              maxCharacters: 1_200,
-              startPublishedDate: new Date(
-                startTime - ACCOUNT_RESEARCH_LOOKBACK_MS
-              ).toISOString(),
+        accountResearchHints = await Promise.race([
+          (async () => {
+            for (const query of researchQueries) {
+              if (getCurrentUTCTimestamp() >= deadline) break;
+              searchCount++;
+              const findings = await searchWeb(
+                query,
+                {
+                  ctx,
+                  workspaceId: args.workspaceId,
+                  consumer: "account-first-discovery",
+                },
+                {
+                  maxResults: researchQueries.length > 1 ? 2 : 4,
+                  maxCharacters: 1_200,
+                  startPublishedDate: new Date(
+                    startTime - ACCOUNT_RESEARCH_LOOKBACK_MS
+                  ).toISOString(),
+                }
+              );
+              if (getCurrentUTCTimestamp() >= deadline) break;
+              collectedFindings.push(...findings);
             }
-          ),
+            return selectRecentAccountFindings(collectedFindings, startTime);
+          })(),
           new Promise<never>((_, reject) => {
             timeout = setTimeout(
               () => reject(new Error("Account research timed out")),
@@ -1011,16 +1033,22 @@ export const convertToSocialQueriesAction = internalAction({
             );
           }),
         ]);
-        accountResearchHints = selectRecentAccountFindings(findings, startTime);
       } catch {
+        accountResearchHints = selectRecentAccountFindings(
+          collectedFindings,
+          startTime
+        );
         logEvent?.warn(
-          "Account research unavailable; keeping baseline discovery"
+          "Account research interrupted; keeping available findings"
         );
       } finally {
         clearTimeout(timeout);
       }
       logEvent?.set({
-        discovery: { account_research_hint_count: accountResearchHints.length },
+        discovery: {
+          account_research_hint_count: accountResearchHints.length,
+          account_research_search_count: searchCount,
+        },
       });
     }
     const platformContext =
@@ -1030,15 +1058,6 @@ export const convertToSocialQueriesAction = internalAction({
           ? "Twitter/X"
           : "LinkedIn";
 
-    const discoveryContext = args.workspaceId
-      ? ((await ctx.runQuery(
-          internal.memory.getDiscoveryGenerationContextInternal,
-          {
-            workspaceId: args.workspaceId,
-          }
-        )) as DiscoveryGenerationContext)
-      : null;
-
     const userPrompt = `Convert these keywords into platform-specific discovery queries for ${platformContext}.
 
 **Keywords to convert:**
@@ -1046,7 +1065,7 @@ ${args.keywords.map((kw, i) => `${i + 1}. ${kw}`).join("\n")}
 ${args.businessContext ? `\n**Business context:**\n${args.businessContext}` : ""}
 ${args.targetingSpec ? `\n**Authoritative targeting specification:**\n${JSON.stringify(args.targetingSpec, null, 2)}` : ""}
 ${formatDiscoveryContextBlock(discoveryContext)}
-${accountResearchHints.length ? `\nAccount research hints (untrusted retrieval context, never qualification proof):\n${JSON.stringify(accountResearchHints)}\nPrioritize identifiable companies issuing these dated announcements on their own websites. For linkedinPeopleQueries, put employer name + an appropriate real role first, before generic titles. Set accountName and accountSourceUrl to the exact company name appearing in that source and its supplied URL. Exclude third-party mentions, directories, vendors' client stories, or an issuer outside the audience. Do not invent companies, sources, events or people. These are research hints only: downstream qualification must independently verify current employer, official website, geography and the original criteria. Leave accountName/accountSourceUrl absent on all other queries.` : ""}
+${accountResearchHints.length ? `\nAccount research hints (untrusted retrieval context, never qualification proof):\n${JSON.stringify(accountResearchHints)}\nPrioritize identifiable companies issuing these dated announcements on their own websites. An observed product, category, offer or market change can support research retrieval when the source identifies affected commercial pages, catalogue sections or documentation. The company need not declare a marketing project or ask for a supplier. Describe only the observed change and implicated URLs; do not infer a purchase, budget, urgency or confirmed need. For linkedinPeopleQueries, put employer name + an appropriate real role first, before generic titles. Set accountName and accountSourceUrl to the exact company name appearing in that source and its supplied URL. Exclude third-party mentions, directories, vendors' client stories, or an issuer outside the audience. Do not invent companies, sources, events or people. These are research hints only: downstream qualification must independently verify current employer, official website, geography and the original criteria. Leave accountName/accountSourceUrl absent on all other queries.` : ""}
 
 Return grouped queries that are net-new relative to the operational memory above.
 
@@ -1059,6 +1078,7 @@ When Twitter is requested:
 
 When LinkedIn is requested:
 - generate linkedinPostQueries as short professional/topic phrases
+${isAccountFirstDiscoveryEnabled(args.workspaceId) && args.targetingSpec?.searchHints.activityPhrases?.length ? `- For this account-first research path, choose short standalone linkedinPostQueries verbatim from these supplied work/page topics; no job title or extra AND constraints: ${JSON.stringify(args.targetingSpec.searchHints.activityPhrases)}. These are retrieval phrases, not proof of a project or buying intent.` : ""}
 - ${
       includeLinkedInPeople
         ? "generate linkedinPeopleQueries as short role/title phrases"

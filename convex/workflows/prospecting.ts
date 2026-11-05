@@ -40,6 +40,7 @@ import {
   chunkLinkedInItems,
   chunkLinkedInProspectsForSave,
   LINKEDIN_PEOPLE_DEFAULT_COUNT,
+  LINKEDIN_ACCOUNT_FIRST_LIMITS,
   normalizeLinkedInPostQueryStats,
 } from "../lib/linkedinSearchHelpers";
 import { PREVIEW_BATCH_LIMITS } from "../lib/previewBatchLimits";
@@ -1463,7 +1464,9 @@ export const searchLinkedInInternal = internalAction({
       error?: string;
     }>;
   }> => {
+    const accountFirst = isAccountFirstDiscoveryEnabled(args.workspaceId);
     if (
+      !accountFirst &&
       args.relaxedQueries?.length &&
       args.applyProviderFilters === undefined
     ) {
@@ -1513,8 +1516,30 @@ export const searchLinkedInInternal = internalAction({
       throw new Error("Workspace not found");
     }
 
+    if (accountFirst) {
+      const [postQueue, peopleQueue] = await Promise.all([
+        ctx.runQuery(internal.keywords.getPrioritizedLinkedInQueries, {
+          workspaceId: args.workspaceId,
+          surface: "posts",
+          restrictToQueries: args.postQueries,
+          limit: LINKEDIN_ACCOUNT_FIRST_LIMITS.postQueries,
+        }),
+        ctx.runQuery(internal.keywords.getPrioritizedLinkedInQueries, {
+          workspaceId: args.workspaceId,
+          surface: "people",
+          restrictToQueries: args.peopleQueries,
+          limit: LINKEDIN_ACCOUNT_FIRST_LIMITS.peopleQueries,
+        }),
+      ]);
+      args = {
+        ...args,
+        postQueries: postQueue.map((query) => query.value),
+        peopleQueries: peopleQueue.map((query) => query.value),
+      };
+    }
+
     const filters =
-      args.applyProviderFilters === false
+      args.applyProviderFilters === false && !accountFirst
         ? undefined
         : workspace.targetingSpec?.searchFilters;
 
@@ -1522,19 +1547,28 @@ export const searchLinkedInInternal = internalAction({
       args.postQueries.length > 0
         ? ctx.runAction(api.integrations.linkedin.searchPosts.searchBatch, {
             queries: args.postQueries,
-            sortBy: "relevance",
+            sortBy: accountFirst ? "date_posted" : "relevance",
             authorJobTitle: filters?.linkedinPosts.authorJobTitle,
-            datePosted: filters?.linkedinPosts.datePosted,
+            datePosted: accountFirst
+              ? filters?.linkedinPosts.datePosted === "past-24h" ||
+                filters?.linkedinPosts.datePosted === "past-week"
+                ? filters.linkedinPosts.datePosted
+                : "past-month"
+              : filters?.linkedinPosts.datePosted,
             maxQueriesPerBatch: 10,
+            ...(accountFirst ? { accountFirstDiscovery: true } : {}),
           })
         : Promise.resolve(null),
       args.peopleQueries.length > 0
         ? ctx.runAction(api.integrations.linkedin.searchPeople.searchBatch, {
             queries: args.peopleQueries,
-            count: LINKEDIN_PEOPLE_DEFAULT_COUNT,
+            count: accountFirst
+              ? LINKEDIN_ACCOUNT_FIRST_LIMITS.peoplePerQuery
+              : LINKEDIN_PEOPLE_DEFAULT_COUNT,
             location: filters?.linkedinPeople.location,
             profileLanguage: filters?.linkedinPeople.profileLanguage,
             maxQueriesPerBatch: 10,
+            ...(accountFirst ? { accountFirstDiscovery: true } : {}),
           })
         : Promise.resolve(null),
     ]);

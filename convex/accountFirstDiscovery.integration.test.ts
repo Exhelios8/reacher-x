@@ -18,10 +18,11 @@ vi.mock("./lib/researchCore", async (importOriginal) => ({
 const modules = import.meta.glob("./**/*.ts");
 const businessContext = "French companies expanding operations";
 const finding = {
-  title: "Acme ouvre une nouvelle usine",
-  url: "https://acme.fr/actualites/usine",
+  title: "Acme présente sa nouvelle gamme et son catalogue",
+  url: "https://acme.fr/actualites/catalogue",
   publishedDate: new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString(),
-  snippet: "Acme annonce une nouvelle usine en France.",
+  snippet:
+    "Acme présente sa nouvelle gamme en France et ses pages catégories : acme.fr/catalogue. Aucun projet d'achat n'est déclaré.",
 };
 const item = (query: string) => ({
   query,
@@ -113,6 +114,9 @@ test("dated named people query survives short plan, storage and actual queue sel
   );
   expect(result.accountResearchHints).toEqual([finding]);
   expect(result.accountResearchQueries).toEqual(["Acme directeur marketing"]);
+  expect(vi.mocked(robustGenerateObject).mock.calls[0][0].prompt).toContain(
+    "The company need not declare a marketing project"
+  );
   expect(result.socialQueries?.slice(0, 1)).toEqual([
     "Acme directeur marketing",
   ]);
@@ -143,7 +147,7 @@ test("dated named people query survives short plan, storage and actual queue sel
   ).toEqual([]);
   const saved = await t.run((ctx) => ctx.db.get(queue[0].id));
   expect(saved?.source).toContain(finding.url);
-  // The preference expires after the first search; normal backlog rotation resumes.
+  // The native opt-in keeps generic title-only backlog out after the first search too.
   await t.run((ctx) =>
     ctx.db.patch(queue[0].id, { lastSearchedLinkedInAt: Date.now() })
   );
@@ -153,7 +157,7 @@ test("dated named people query survives short plan, storage and actual queue sel
     allowedDiscoveryStages: ["strict"],
     limit: 1,
   });
-  expect(next.map((item) => item.value)).toEqual(["directeur général"]);
+  expect(next.map((item) => item.value)).toEqual(["Acme directeur marketing"]);
 });
 
 test("distinct employers with one role survive; duplicate hints preserve retirement and search history", async () => {
@@ -323,6 +327,66 @@ test("an invented employer is discarded instead of entering the generic queue", 
   ]);
   expect(result.accountResearchQueries).toBeUndefined();
 });
+
+test.each(["empty", "unrelated dated source", "second lookup fails"])(
+  "two topics preserve useful findings when %s",
+  async (scenario) => {
+    const { t, workspaceId } = await fixture();
+    const spec = buildLegacyWorkspaceTargetingSpec({
+      description: businessContext,
+      profiles: [],
+    });
+    spec.searchHints.activityPhrases = [
+      "nouvelle gamme catalogue",
+      "migration documentation API",
+    ];
+    spec.searchHints.languageCodes = ["fr"];
+    spec.searchFilters!.linkedinPeople.location = "France";
+    const unrelated = {
+      ...finding,
+      title: "Example ouvre un bureau",
+      url: "https://example.fr/actualites/bureau",
+      snippet:
+        "Example ouvre un bureau à Tunis. Aucun changement de pages n'est décrit.",
+    };
+    vi.mocked(searchWeb).mockResolvedValueOnce(
+      scenario === "empty"
+        ? []
+        : scenario === "unrelated dated source"
+          ? [unrelated]
+          : [finding]
+    );
+    if (scenario === "second lookup fails")
+      vi.mocked(searchWeb).mockRejectedValueOnce(new Error("Exa unavailable"));
+    else vi.mocked(searchWeb).mockResolvedValueOnce([finding]);
+    const result = await t.action(
+      internal.agents.internal.convertToSocialQueriesAction,
+      {
+        workspaceId,
+        businessContext,
+        targetingSpec: spec,
+        keywords: ["expansion"],
+        platforms: ["linkedin"],
+      }
+    );
+    expect(searchWeb).toHaveBeenCalledTimes(2);
+    expect(
+      vi.mocked(searchWeb).mock.calls.every((call) => call[2]?.maxResults === 2)
+    ).toBe(true);
+    const queries = vi.mocked(searchWeb).mock.calls.map((call) => call[0]);
+    expect(new Set(queries).size).toBe(2);
+    expect(
+      queries.every((query) =>
+        query.endsWith("France actualités entreprise site officiel")
+      )
+    ).toBe(true);
+    expect(result.accountResearchQueries).toEqual(["Acme directeur marketing"]);
+    expect(result.accountResearchHints).toContainEqual(finding);
+    expect(vi.mocked(robustGenerateObject).mock.calls[0][0].prompt).toContain(
+      "verbatim from these supplied work/page topics"
+    );
+  }
+);
 
 test.each([false, true])(
   "model marker collision requires a grounded account row: %s",

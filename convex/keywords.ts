@@ -49,6 +49,7 @@ import {
   type QueryPriority,
 } from "./lib/queryPrioritizationCore";
 import { getStricterDiscoveryStage } from "./lib/targetingSpecCore";
+import { LINKEDIN_ACCOUNT_FIRST_LIMITS } from "./lib/linkedinSearchHelpers";
 import {
   resolveTwitterProspectingSearchMode,
   type TwitterProspectingSearchMode,
@@ -144,6 +145,7 @@ async function getPrioritizedSocialQueries(
     surface?: "posts" | "people";
     allowedDiscoveryStages?: Array<"strict" | "balanced" | "broad">;
     limit: number;
+    restrictToQueries?: string[];
   }
 ): Promise<
   Array<{
@@ -192,6 +194,17 @@ async function getPrioritizedSocialQueries(
       keyword.twitterLastSeenPostId,
     ])
   );
+  const accountFirstLinkedIn =
+    args.platform === "linkedin" &&
+    isAccountFirstDiscoveryEnabled(args.workspaceId);
+  const now = getCurrentUTCTimestamp();
+  const requestedValues = args.restrictToQueries
+    ? new Set(args.restrictToQueries.map(normalizeKeyword))
+    : undefined;
+  const workPhrases =
+    workspace.targetingSpec?.searchHints.activityPhrases
+      ?.map(normalizeKeyword)
+      .filter(Boolean) ?? [];
   const candidates = keywords
     .filter((keyword) => isCurrentTargetingLearning(keyword, workspace))
     .filter((keyword) => keyword.status !== "deprecated")
@@ -202,6 +215,26 @@ async function getPrioritizedSocialQueries(
         args.allowedDiscoveryStages.includes(keyword.discoveryStage)
     )
     .filter((keyword) => keywordTargetsPlatform(keyword, args.platform))
+    .filter(
+      (keyword) =>
+        !requestedValues ||
+        requestedValues.has(
+          normalizeKeyword(keyword.originalValue ?? keyword.value)
+        )
+    )
+    .filter(
+      (keyword) =>
+        !accountFirstLinkedIn ||
+        (args.surface === "people"
+          ? isFreshAccountResearchHint(keyword.source, now)
+          : keyword.queryStyle !== "role_title" &&
+            (!workPhrases.length ||
+              workPhrases.some((phrase) =>
+                normalizeKeyword(
+                  keyword.originalValue ?? keyword.value
+                ).includes(phrase)
+              )))
+    )
     .filter((keyword) =>
       args.platform === "linkedin" && args.surface
         ? keywordTargetsLinkedInSurface(keyword, args.surface)
@@ -232,42 +265,19 @@ async function getPrioritizedSocialQueries(
       };
     });
 
-  const now = getCurrentUTCTimestamp();
-  const freshAccountQueryIds =
-    args.platform === "linkedin" &&
-    args.surface === "people" &&
-    isAccountFirstDiscoveryEnabled(args.workspaceId)
-      ? new Set(
-          keywords
-            .filter((keyword) =>
-              isFreshAccountResearchHint(keyword.source, now)
-            )
-            .map((keyword) => keyword._id)
+  return prioritizeQueries({
+    candidates,
+    limit: accountFirstLinkedIn
+      ? Math.min(
+          args.limit,
+          args.surface === "people"
+            ? LINKEDIN_ACCOUNT_FIRST_LIMITS.peopleQueries
+            : LINKEDIN_ACCOUNT_FIRST_LIMITS.postQueries
         )
-      : new Set<Id<"keywords">>();
-  // Reserve at most two first searches; existing stage/targeting filters still apply.
-  const accountQueries = prioritizeQueries({
-    candidates: candidates.filter(
-      (candidate) =>
-        freshAccountQueryIds.has(candidate.id) &&
-        candidate.lastSearchedAt === undefined
-    ),
-    limit: Math.min(2, args.limit),
+      : args.limit,
     now,
-  });
-  const reservedIds = new Set(accountQueries.map((candidate) => candidate.id));
-  return [
-    ...accountQueries,
-    ...prioritizeQueries({
-      candidates: candidates.filter(
-        (candidate) => !reservedIds.has(candidate.id)
-      ),
-      limit: Math.max(0, args.limit - accountQueries.length),
-      now,
-      retireAfterUnqualifiedSearches:
-        args.platform === "twitter" ? 3 : undefined,
-    }),
-  ].map((candidate) => ({
+    retireAfterUnqualifiedSearches: args.platform === "twitter" ? 3 : undefined,
+  }).map((candidate) => ({
     id: candidate.id,
     value: candidate.value,
     lastSearchedAt: candidate.lastSearchedAt,
@@ -572,6 +582,7 @@ export const getPrioritizedLinkedInQueries = internalQuery({
     surface: linkedinSearchSurfaceValidator,
     allowedDiscoveryStages: v.optional(v.array(discoveryStageValidator)),
     limit: v.optional(v.number()),
+    restrictToQueries: v.optional(v.array(v.string())),
   },
   handler: async (ctx, args) =>
     await getPrioritizedSocialQueries(ctx, {
@@ -580,6 +591,7 @@ export const getPrioritizedLinkedInQueries = internalQuery({
       surface: args.surface,
       allowedDiscoveryStages: args.allowedDiscoveryStages,
       limit: args.limit ?? 8,
+      restrictToQueries: args.restrictToQueries,
     }),
 });
 
@@ -641,6 +653,13 @@ export const markQueriesAsSearched = internalMutation({
                 value: keyword.originalValue ?? keyword.value,
               });
         const perQueryStats = queryStatsMap.get(keyword.value);
+        if (
+          args.platform === "linkedin" &&
+          isAccountFirstDiscoveryEnabled(keyword.workspaceId) &&
+          args.queryStats !== undefined &&
+          !perQueryStats
+        )
+          continue;
         if (args.platform === "twitter") {
           await ctx.db.patch(queryId, {
             lastSearchedTwitterAt: now,

@@ -16,6 +16,7 @@ import {
   getNextLinkedInPeopleSearchStart,
   LINKEDIN_PEOPLE_DEFAULT_COUNT,
   LINKEDIN_PEOPLE_MAX_PAGES_PER_QUERY,
+  LINKEDIN_ACCOUNT_FIRST_LIMITS,
   type LinkedInPeopleSearchAttempt,
 } from "../../lib/linkedinSearchHelpers";
 import { requestLinkdApiData } from "./linkdapiClient";
@@ -194,6 +195,7 @@ async function collectPaginatedPeopleResults(
     profileLanguage?: string;
     count: number;
     initialResult: InternalSearchPeopleResult;
+    maxPages?: number;
   }
 ): Promise<InternalSearchPeopleResult> {
   const people = [...args.initialResult.people];
@@ -206,7 +208,7 @@ async function collectPaginatedPeopleResults(
 
   for (
     let pageIndex = 1;
-    pageIndex < LINKEDIN_PEOPLE_MAX_PAGES_PER_QUERY;
+    pageIndex < (args.maxPages ?? LINKEDIN_PEOPLE_MAX_PAGES_PER_QUERY);
     pageIndex += 1
   ) {
     if (!lastResult.hasMore || seenStarts.has(nextStart)) {
@@ -255,7 +257,8 @@ async function collectPaginatedPeopleResults(
 
 async function resolveGeoUrn(
   ctx: ActionCtx,
-  location: string | undefined
+  location: string | undefined,
+  preserveConstraint = false
 ): Promise<string | undefined> {
   const normalized = location?.trim();
   if (!normalized) return undefined;
@@ -268,6 +271,7 @@ async function resolveGeoUrn(
     });
     return extractLinkedInGeoId(data);
   } catch (error) {
+    if (preserveConstraint) throw error;
     console.warn(
       "[LinkedInSearchPeople] Location lookup failed; continuing without geoUrn",
       error
@@ -334,14 +338,42 @@ export const searchBatch = action({
     maxQueriesPerBatch: v.optional(v.number()),
     location: v.optional(v.string()),
     profileLanguage: v.optional(v.string()),
+    accountFirstDiscovery: v.optional(v.boolean()),
   },
   handler: async (ctx, args): Promise<LinkedInPeopleBatchSearchResult> => {
     const startTime = getCurrentUTCTimestamp();
-    const requestedCount = args.count ?? LINKEDIN_PEOPLE_DEFAULT_COUNT;
-    const geoUrn = await resolveGeoUrn(ctx, args.location);
+    const requestedCount = args.accountFirstDiscovery
+      ? Math.min(
+          Math.max(
+            1,
+            Math.floor(
+              args.count ?? LINKEDIN_ACCOUNT_FIRST_LIMITS.peoplePerQuery
+            )
+          ),
+          LINKEDIN_ACCOUNT_FIRST_LIMITS.peoplePerQuery
+        )
+      : (args.count ?? LINKEDIN_PEOPLE_DEFAULT_COUNT);
+    const geoUrn = await resolveGeoUrn(
+      ctx,
+      args.location,
+      args.accountFirstDiscovery
+    );
+    if (args.accountFirstDiscovery && args.location?.trim() && !geoUrn)
+      throw new Error("LinkedIn location is temporarily unavailable");
     const queriesToExecute = normalizeQueryList(args.queries).slice(
       0,
-      args.maxQueriesPerBatch ?? 20
+      args.accountFirstDiscovery
+        ? Math.max(
+            0,
+            Math.min(
+              Math.floor(
+                args.maxQueriesPerBatch ??
+                  LINKEDIN_ACCOUNT_FIRST_LIMITS.peopleQueries
+              ),
+              LINKEDIN_ACCOUNT_FIRST_LIMITS.peopleQueries
+            )
+          )
+        : (args.maxQueriesPerBatch ?? 20)
     );
 
     if (queriesToExecute.length === 0) {
@@ -371,13 +403,21 @@ export const searchBatch = action({
 
     for (let index = 0; index < queriesToExecute.length; index += 1) {
       const query = queriesToExecute[index];
-      const attempts = buildLinkedInPeopleSearchAttempts({
-        searchModes: looksLikeRoleTitleQuery(query)
-          ? ["title", "keyword"]
-          : ["keyword"],
-        geoUrn,
-        profileLanguage: args.profileLanguage,
-      });
+      const attempts: LinkedInPeopleSearchAttempt[] = args.accountFirstDiscovery
+        ? [
+            {
+              searchMode: "keyword",
+              geoUrn,
+              profileLanguage: args.profileLanguage,
+            },
+          ]
+        : buildLinkedInPeopleSearchAttempts({
+            searchModes: looksLikeRoleTitleQuery(query)
+              ? ["title", "keyword"]
+              : ["keyword"],
+            geoUrn,
+            profileLanguage: args.profileLanguage,
+          });
       const runIdPromise = new Promise<RunId>((resolve, reject) => {
         void (async () => {
           try {
@@ -472,13 +512,25 @@ export const searchBatch = action({
               profileLanguage: attempt.profileLanguage,
               count: requestedCount,
               initialResult,
+              maxPages: args.accountFirstDiscovery
+                ? LINKEDIN_ACCOUNT_FIRST_LIMITS.pagesPerQuery
+                : undefined,
             });
           } catch (error) {
             finalError =
               error instanceof Error ? error.message : "Unknown error";
           }
 
-          if (result && result.success && result.people.length > 0) {
+          if (result && args.accountFirstDiscovery)
+            result = {
+              ...result,
+              people: result.people.slice(0, requestedCount),
+            };
+          if (
+            result &&
+            result.success &&
+            (result.people.length > 0 || args.accountFirstDiscovery)
+          ) {
             allPeople.push(...result.people);
             totalPeopleFound += result.people.length;
             queriesSucceeded += 1;

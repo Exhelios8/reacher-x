@@ -1,5 +1,6 @@
 import type { WorkspaceTargetingSpec } from "./targetingSpecCore";
 import type { ResearchFinding } from "./researchCore";
+import { createStableHash } from "./memoryHelpers";
 
 export const ACCOUNT_RESEARCH_LOOKBACK_MS = 90 * 24 * 60 * 60 * 1000;
 const ACCOUNT_HINT_PREFIX = "account_research_hint:";
@@ -24,27 +25,57 @@ export function isAccountFirstDiscoveryEnabled(workspaceId?: string): boolean {
   );
 }
 
-export function buildAccountResearchQuery(args: {
-  businessContext?: string;
+export function buildAccountResearchQueries(args: {
   targetingSpec?: WorkspaceTargetingSpec;
+  keywords: string[];
   now: number;
-}): string {
-  const cutoff = new Date(args.now - ACCOUNT_RESEARCH_LOOKBACK_MS)
-    .toISOString()
-    .slice(0, 10);
-  return [
-    `Find dated company announcements published after ${cutoff} on the issuing company's own official website/newsroom/blog.`,
-    "Find actual operating events (launch, expansion, new location, hiring, investment), not advice, agencies selling services, directories, social profiles, or vendors' customer case studies.",
-    `Target audience and required constraints: ${JSON.stringify({
-      summary: args.targetingSpec?.summary,
-      locations: args.targetingSpec?.searchHints.locations,
-      industries: args.targetingSpec?.searchHints.industries,
-      requiredCriteria: args.targetingSpec?.criteria
-        .filter((criterion) => criterion.kind === "required")
-        .map((criterion) => criterion.description),
-      originalAudience: args.businessContext,
-    }).slice(0, 6_000)}`,
-  ].join("\n");
+}): string[] {
+  const spec = args.targetingSpec;
+  const suppliedActivities = spec?.searchHints.activityPhrases ?? [];
+  const intentTerms =
+    spec?.criteria
+      .filter(
+        (criterion) =>
+          criterion.category === "intent" && criterion.kind !== "exclusion"
+      )
+      .flatMap((criterion) => criterion.terms) ?? [];
+  const phrases = [
+    ...new Set(
+      (suppliedActivities.length
+        ? suppliedActivities
+        : intentTerms.length
+          ? intentTerms
+          : args.keywords
+      )
+        .map((phrase) => phrase.replace(/\s+/g, " ").trim().slice(0, 160))
+        .filter(Boolean)
+    ),
+  ];
+  if (!phrases.length) return [];
+  const location =
+    spec?.searchHints.locations[0] ??
+    spec?.searchFilters?.linkedinPeople.location ??
+    "";
+  const sourceTerms =
+    spec?.searchHints.languageCodes?.[0] === "fr"
+      ? "actualités entreprise site officiel"
+      : "company official news";
+  // Rotate supplied work/page topics across cycles without adding a model call or durable state.
+  const offset =
+    (parseInt(createStableHash(args.keywords.join("\n")), 16) +
+      Math.floor(args.now / (5 * 60 * 1000))) %
+    phrases.length;
+  return Array.from({ length: Math.min(2, phrases.length) }, (_, index) =>
+    [
+      phrases[
+        (offset + index * Math.ceil(phrases.length / 2)) % phrases.length
+      ],
+      location,
+      sourceTerms,
+    ]
+      .filter(Boolean)
+      .join(" ")
+  );
 }
 
 export function selectRecentAccountFindings(
