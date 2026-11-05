@@ -19,6 +19,7 @@ import { getTextEmbeddingModel } from "../../lib/embeddingModels";
 type AgentMemoryRagFilters = {
   contentType:
     | "evidence_post"
+    | "employer_event"
     | "pain_point"
     | "profile"
     | "query_candidate"

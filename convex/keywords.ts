@@ -1,5 +1,9 @@
 import { getWorkspaceIcpRefreshFingerprint } from "./lib/workspaceIcpSignalsCore";
 import {
+  isAccountFirstDiscoveryEnabled,
+  isFreshAccountResearchHint,
+} from "./lib/accountFirstDiscoveryCore";
+import {
   getLearningTargetingFingerprint,
   isCurrentTargetingLearning,
 } from "./lib/learningTargetingHelpers";
@@ -228,12 +232,42 @@ async function getPrioritizedSocialQueries(
       };
     });
 
-  return prioritizeQueries({
-    candidates,
-    limit: args.limit,
-    now: getCurrentUTCTimestamp(),
-    retireAfterUnqualifiedSearches: args.platform === "twitter" ? 3 : undefined,
-  }).map((candidate) => ({
+  const now = getCurrentUTCTimestamp();
+  const freshAccountQueryIds =
+    args.platform === "linkedin" &&
+    args.surface === "people" &&
+    isAccountFirstDiscoveryEnabled(args.workspaceId)
+      ? new Set(
+          keywords
+            .filter((keyword) =>
+              isFreshAccountResearchHint(keyword.source, now)
+            )
+            .map((keyword) => keyword._id)
+        )
+      : new Set<Id<"keywords">>();
+  // Reserve at most two first searches; existing stage/targeting filters still apply.
+  const accountQueries = prioritizeQueries({
+    candidates: candidates.filter(
+      (candidate) =>
+        freshAccountQueryIds.has(candidate.id) &&
+        candidate.lastSearchedAt === undefined
+    ),
+    limit: Math.min(2, args.limit),
+    now,
+  });
+  const reservedIds = new Set(accountQueries.map((candidate) => candidate.id));
+  return [
+    ...accountQueries,
+    ...prioritizeQueries({
+      candidates: candidates.filter(
+        (candidate) => !reservedIds.has(candidate.id)
+      ),
+      limit: Math.max(0, args.limit - accountQueries.length),
+      now,
+      retireAfterUnqualifiedSearches:
+        args.platform === "twitter" ? 3 : undefined,
+    }),
+  ].map((candidate) => ({
     id: candidate.id,
     value: candidate.value,
     lastSearchedAt: candidate.lastSearchedAt,
@@ -949,6 +983,13 @@ export const saveKeywordsBatch = internalMutation({
       });
       const existing = existingMap.get(canonical.canonicalKey);
 
+      if (
+        existing?.status === "deprecated" &&
+        isFreshAccountResearchHint(keyword.source, now)
+      ) {
+        skipped++;
+        continue;
+      }
       if (existing) {
         const previous = isCurrentTargetingLearning(existing, workspace)
           ? existing

@@ -2,6 +2,7 @@ import { afterEach, describe, expect, test, vi } from "vitest";
 import { qualifyProspectCore } from "./qualificationCore";
 import { robustGenerateObject } from "./ai";
 import type { WorkspaceTargetingSpec } from "./targetingSpecCore";
+import { prepareQualificationCandidates } from "./qualificationEvidenceCore";
 
 vi.mock("./ai", async (importOriginal) => ({
   ...(await importOriginal<typeof import("./ai")>()),
@@ -285,4 +286,171 @@ describe("direct strong qualification and profile evidence", () => {
     }
     expect(robustGenerateObject).not.toHaveBeenCalled();
   });
+});
+
+describe("company events preserve personal qualification boundaries", () => {
+  test.each([
+    {
+      kind: "preferred",
+      category: "intent",
+      support: "operational_activity",
+      expected: "matched",
+    },
+    {
+      kind: "required",
+      category: "intent",
+      support: "operational_activity",
+      expected: "unknown",
+    },
+    {
+      kind: "preferred",
+      category: "profile_fit",
+      support: "operational_activity",
+      expected: "unknown",
+    },
+    {
+      kind: "exclusion",
+      category: "intent",
+      support: "operational_activity",
+      expected: "unknown",
+    },
+    {
+      kind: "preferred",
+      category: "intent",
+      support: "none",
+      expected: "unknown",
+    },
+    {
+      kind: "required",
+      category: "profile_fit",
+      support: "none",
+      expected: "unknown",
+      referenceMode: "unsupported-person",
+    },
+    {
+      kind: "required",
+      category: "profile_fit",
+      support: "none",
+      expected: "unknown",
+      referenceMode: "none",
+    },
+  ] as const)(
+    "company evidence cannot impersonate a person or satisfy a mandatory gate: %j",
+    async (row) => {
+      const { kind, category, support, expected } = row;
+      const referenceMode =
+        "referenceMode" in row ? row.referenceMode : "company";
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date("2026-11-05T12:00:00Z"));
+      const companyText =
+        "Courses is migrating its learning catalogue. No service offers, please.";
+      const companyProfile = {
+        urn: "ACo123",
+        url: "https://www.linkedin.com/in/educator",
+        employerEvidence: {
+          companyId: "42",
+          personUrn: "ACo123",
+          relationshipSourceUrl: "https://www.linkedin.com/in/educator",
+          company: { name: "Courses", website: "https://courses.example" },
+          events: [
+            {
+              companyId: "42",
+              url: "https://courses.example/news",
+              finalUrl: "https://courses.example/news",
+              publishedAt: "2026-11-04T12:00:00Z",
+              text: companyText,
+            },
+          ],
+        },
+      };
+      const companyCandidate = prepareQualificationCandidates({
+        platform: "linkedin",
+        profileData: companyProfile,
+        employerEvidence: companyProfile.employerEvidence,
+        evidencePosts: [],
+        discoveryQueries: [],
+      })[0];
+      const resultObject = response().object as Record<string, unknown>;
+      vi.mocked(robustGenerateObject).mockResolvedValueOnce({
+        object: {
+          ...resultObject,
+          goalAssessment: {
+            objective: "Contact company",
+            rationale: "Company refusal cannot be assigned to the person",
+            verdict: "contradicted",
+            candidateId: companyCandidate.candidateId,
+            conflictingQuote: "No service offers, please.",
+          },
+          criterionResults: [
+            {
+              criterionId: "usage",
+              verdict: "matched",
+              confidence: 1,
+              rationale: "The company announced its catalogue migration",
+              candidateIds:
+                referenceMode === "none"
+                  ? []
+                  : [
+                      companyCandidate.candidateId,
+                      ...(referenceMode === "unsupported-person"
+                        ? ["social:linkedin:unsupported"]
+                        : []),
+                    ],
+              employerEventSupport: support,
+            },
+          ],
+          evidenceDecisions: [
+            {
+              candidateId: companyCandidate.candidateId,
+              supportsQualification: true,
+              attributedToEmployer: true,
+              supportingQuote: "Courses is migrating its learning catalogue.",
+            },
+            ...(referenceMode === "unsupported-person"
+              ? [
+                  {
+                    candidateId: "social:linkedin:unsupported",
+                    supportsQualification: false,
+                    attributedToEmployer: false,
+                    supportingQuote: "",
+                  },
+                ]
+              : []),
+          ],
+        },
+      } as Awaited<ReturnType<typeof robustGenerateObject>>);
+      const result = await qualifyProspectCore({
+        ...params,
+        routing: "onboarding",
+        platform: "linkedin",
+        profileData: companyProfile,
+        employerEvidence: companyProfile.employerEvidence,
+        evidencePosts:
+          referenceMode === "unsupported-person"
+            ? [
+                {
+                  id: "unsupported",
+                  url: "https://www.linkedin.com/posts/educator-post",
+                  text: "I wrote something generic.",
+                  author: { urn: "ACo123" },
+                },
+              ]
+            : [],
+        targetingSpec: {
+          ...spec,
+          criteria: spec.criteria.map((criterion) => ({
+            ...criterion,
+            kind,
+            category,
+          })),
+        },
+      });
+      expect(result.qualificationSources[0].evidenceKind).toBe(
+        "employer_event"
+      );
+      expect(result.criterionResults[0].verdict).toBe(expected);
+      expect(result.reasoning).not.toContain("Evidence contradicts");
+      if (kind === "required") expect(result.qualified).toBe(false);
+    }
+  );
 });

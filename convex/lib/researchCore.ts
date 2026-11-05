@@ -86,6 +86,8 @@ export interface ResearchQueryOutcome {
 
 export interface WebPageReadOutcome {
   url: string;
+  finalUrl?: string;
+  publishedDate?: string;
   title: string;
   snippet: string;
   author?: string;
@@ -104,6 +106,7 @@ export type WebSearchOptions = {
   maxResults?: number;
   maxCharacters?: number;
   includeDomains?: string[];
+  startPublishedDate?: string;
 };
 
 /** Parse the public first-party blog index without importing the Next app. */
@@ -234,6 +237,9 @@ export async function searchWeb(
         ...(options.includeDomains?.length
           ? { includeDomains: options.includeDomains }
           : {}),
+        ...(options.startPublishedDate
+          ? { startPublishedDate: options.startPublishedDate }
+          : {}),
         contents: { text: { maxCharacters } },
       });
     },
@@ -262,7 +268,8 @@ export async function searchWeb(
 /** Read clean page text directly from known URLs already stored on a profile. */
 export async function readWebPages(
   urls: string[],
-  providerContext: ResearchProviderContext
+  providerContext: ResearchProviderContext,
+  options?: { requirePublisherMetadata?: boolean }
 ): Promise<WebPageReadOutcome[]> {
   const limitedUrls = [
     ...new Set(urls.flatMap((url) => (url.trim() ? [url.trim()] : []))),
@@ -299,6 +306,25 @@ export async function readWebPages(
     }));
   }
 
+  if (options?.requirePublisherMetadata) {
+    return await Promise.all(
+      limitedUrls.map(async (url) => {
+        const fallback = await describeUrlWithHtmlFallback(url, {
+          rejectRedirects: true,
+        });
+        return fallback.success
+          ? {
+              url,
+              finalUrl: fallback.finalUrl,
+              publishedDate: fallback.publishedDate,
+              title: fallback.title ?? url,
+              snippet: fallback.content.slice(0, SNIPPET_MAX_CHARS),
+              author: fallback.author,
+            }
+          : { url, title: url, snippet: "", error: fallback.error };
+      })
+    );
+  }
   try {
     const exa = getExaClient();
     const response = await trackProviderRequest({
@@ -351,6 +377,8 @@ export async function readWebPages(
         if (snippet) {
           return {
             url,
+            finalUrl: result?.url,
+            publishedDate: result?.publishedDate ?? undefined,
             title: result?.title?.trim() || url,
             snippet: snippet.slice(0, SNIPPET_MAX_CHARS),
             author: result?.author?.trim() || undefined,
@@ -361,6 +389,8 @@ export async function readWebPages(
         return fallback.success
           ? {
               url,
+              finalUrl: fallback.finalUrl,
+              publishedDate: fallback.publishedDate,
               title: fallback.title?.trim() || url,
               snippet: fallback.content.slice(0, SNIPPET_MAX_CHARS),
               author: fallback.author,
@@ -392,6 +422,8 @@ export async function readWebPages(
         return fallback.success
           ? {
               url,
+              finalUrl: fallback.finalUrl,
+              publishedDate: fallback.publishedDate,
               title: fallback.title?.trim() || url,
               snippet: fallback.content.slice(0, SNIPPET_MAX_CHARS),
               author: fallback.author,

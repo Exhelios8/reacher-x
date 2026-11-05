@@ -12,6 +12,14 @@ import {
   isLinkedInPostLike,
   normalizeLinkedInPost,
 } from "@/shared/lib/linkedin/post";
+import { isPublicHttpUrl } from "@/shared/lib/utils/url/urlSafety";
+import { isEmployerEventEvidence } from "./prospectEvidence";
+
+function getPublicEvidenceUrl(value: unknown): string | undefined {
+  if (typeof value !== "string" || !isPublicHttpUrl(value)) return undefined;
+  const url = new URL(value);
+  return url.username || url.password ? undefined : value;
+}
 
 function getEvidencePostId(post: unknown): string | null {
   if (!post || typeof post !== "object") return null;
@@ -73,7 +81,7 @@ export function normalizeProspectProfileData(
   const data = prospect.data as Record<string, unknown> | undefined;
   const socialProfiles = prospect.socialProfiles as SocialProfiles | undefined;
   const rawEvidencePosts = Array.isArray(prospect.evidencePosts)
-    ? (prospect.evidencePosts as unknown[])
+    ? prospect.evidencePosts.filter((post) => !isEmployerEventEvidence(post))
     : [];
   const rawPainPoints = prospect.painPoints as PainPoint[] | undefined;
   const rawFinance = prospect.finance as
@@ -98,7 +106,9 @@ export function normalizeProspectProfileData(
   const painPoints = rawPainPoints?.map((painPoint) => ({
     ...painPoint,
     evidencePosts: Array.isArray(painPoint.evidencePosts)
-      ? painPoint.evidencePosts.map(resolveEvidencePost)
+      ? painPoint.evidencePosts
+          .filter((post) => !isEmployerEventEvidence(post))
+          .map(resolveEvidencePost)
       : [],
   }));
 
@@ -106,7 +116,9 @@ export function normalizeProspectProfileData(
     ? {
         displayValue: rawFinance.displayValue,
         evidencePosts: Array.isArray(rawFinance.evidencePosts)
-          ? rawFinance.evidencePosts.map(resolveEvidencePost)
+          ? rawFinance.evidencePosts
+              .filter((post) => !isEmployerEventEvidence(post))
+              .map(resolveEvidencePost)
           : [],
       }
     : undefined;
@@ -124,9 +136,36 @@ export function normalizeProspectProfileData(
             sourceId ?? `qualification-source-${index}`,
             {
               sourceId,
-              sourcePost:
-                (sourceId ? evidencePostsById.get(sourceId) : undefined) ??
-                resolveEvidencePost(source.sourcePost),
+              evidenceKind:
+                typeof source.evidenceKind === "string"
+                  ? source.evidenceKind
+                  : undefined,
+              sourceUrl: getPublicEvidenceUrl(
+                source.evidenceUrl ?? source.sourceUrl
+              ),
+              employerName:
+                typeof source.employerName === "string"
+                  ? source.employerName
+                  : undefined,
+              supportingQuote:
+                typeof source.supportingQuote === "string"
+                  ? source.supportingQuote
+                  : undefined,
+              publishedAt:
+                typeof source.publishedAt === "string" &&
+                Number.isFinite(Date.parse(source.publishedAt))
+                  ? source.publishedAt
+                  : undefined,
+              verifiedAt:
+                typeof source.verifiedAt === "number" &&
+                Number.isFinite(source.verifiedAt) &&
+                source.verifiedAt > 0
+                  ? source.verifiedAt
+                  : undefined,
+              sourcePost: isEmployerEventEvidence(source)
+                ? undefined
+                : ((sourceId ? evidencePostsById.get(sourceId) : undefined) ??
+                  resolveEvidencePost(source.sourcePost)),
             },
           ] as const;
         })

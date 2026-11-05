@@ -18,6 +18,16 @@ import {
   robustGenerateObject,
 } from "../lib/ai";
 import { isRecord } from "../lib/typeGuards";
+import { searchWeb, type ResearchFinding } from "../lib/researchCore";
+import {
+  ACCOUNT_RESEARCH_LOOKBACK_MS,
+  buildAccountResearchQuery,
+  groundAccountQuery,
+  isAccountFirstDiscoveryEnabled,
+  isAccountResearchHintFromFindings,
+  isFreshAccountResearchHint,
+  selectRecentAccountFindings,
+} from "../lib/accountFirstDiscoveryCore";
 import {
   prospectPlatformValidator,
   workspaceTargetingSpecValidator,
@@ -55,6 +65,8 @@ const socialQueryMetadataSchema = z.object({
 
 const socialQueryItemSchema = socialQueryMetadataSchema.extend({
   query: z.string().max(120),
+  accountName: z.string().max(100).optional(),
+  accountSourceUrl: z.string().max(2048).optional(),
 });
 
 const twitterSocialQueryItemSchema = socialQueryMetadataSchema.extend({
@@ -337,6 +349,7 @@ function buildSocialQueryActionResult(args: {
   includeLinkedIn: boolean;
   includeLinkedInPeople: boolean;
   targetingSpec?: WorkspaceTargetingSpec;
+  accountResearchHints?: ResearchFinding[];
 }): {
   success: true;
   socialQueries: string[];
@@ -349,6 +362,8 @@ function buildSocialQueryActionResult(args: {
   };
   queryMetadata: SocialQueryMetadata[];
   reasoning: string;
+  accountResearchHints?: ResearchFinding[];
+  accountResearchQueries?: string[];
 } {
   const validCriterionIds = new Set(
     args.targetingSpec?.criteria.map((criterion) => criterion.id) ?? []
@@ -359,6 +374,12 @@ function buildSocialQueryActionResult(args: {
       .slice(0, 6);
   const twitterInputs = args.object.twitterQueries.map((item) => ({
     ...item,
+    sourceKeyword: isFreshAccountResearchHint(
+      item.sourceKeyword,
+      getCurrentUTCTimestamp()
+    )
+      ? undefined
+      : item.sourceKeyword,
     query: applyTwitterProviderSearchFilters({
       query: item.query,
       stage: item.stage,
@@ -373,21 +394,49 @@ function buildSocialQueryActionResult(args: {
       )
     : [];
   const linkedinPostQueries = args.includeLinkedIn
-    ? dedupeQueryItems(args.object.linkedinPostQueries, "linkedin").slice(
-        0,
-        MAX_SOCIAL_QUERY_ITEMS_PER_GROUP
-      )
+    ? dedupeQueryItems(
+        args.object.linkedinPostQueries.map((item) => ({
+          ...item,
+          sourceKeyword: isFreshAccountResearchHint(
+            item.sourceKeyword,
+            getCurrentUTCTimestamp()
+          )
+            ? undefined
+            : item.sourceKeyword,
+        })),
+        "linkedin"
+      ).slice(0, MAX_SOCIAL_QUERY_ITEMS_PER_GROUP)
     : [];
   const linkedinPeopleQueries = args.includeLinkedInPeople
     ? dedupeQueryItems(
-        args.object.linkedinPeopleQueries.map((item) => ({
-          ...item,
-          stage: resolvePeopleQueryStage(
-            item.query,
-            item.stage,
-            args.targetingSpec
-          ),
-        })),
+        [
+          ...args.object.linkedinPeopleQueries.flatMap((item) => {
+            const grounded = groundAccountQuery(
+              {
+                ...item,
+                query: normalizeSocialQueryText(item.query, "linkedin"),
+              },
+              args.accountResearchHints ?? []
+            );
+            return grounded ? [grounded] : [];
+          }),
+          ...args.object.linkedinPeopleQueries
+            .filter((item) => !item.accountName && !item.accountSourceUrl)
+            .map((item) => ({
+              ...item,
+              sourceKeyword: isFreshAccountResearchHint(
+                item.sourceKeyword,
+                getCurrentUTCTimestamp()
+              )
+                ? undefined
+                : item.sourceKeyword,
+              stage: resolvePeopleQueryStage(
+                item.query,
+                item.stage,
+                args.targetingSpec
+              ),
+            })),
+        ],
         "linkedin"
       ).slice(0, MAX_SOCIAL_QUERY_ITEMS_PER_GROUP)
     : [];
@@ -424,6 +473,13 @@ function buildSocialQueryActionResult(args: {
         );
         const mergedMetadata: SocialQueryMetadata = {
           ...existing,
+          sourceKeyword: isAccountResearchHintFromFindings(
+            item.sourceKeyword,
+            args.accountResearchHints ?? [],
+            getCurrentUTCTimestamp()
+          )
+            ? item.sourceKeyword
+            : existing.sourceKeyword,
           platformTargets,
           discoveryStage: getStricterDiscoveryStage(
             existing.discoveryStage,
@@ -484,11 +540,25 @@ function buildSocialQueryActionResult(args: {
   // LEGACY COMPAT: keep a flattened socialQueries array until all
   // consumers read queriesByPlatform/queryMetadata and historical
   // social_query rows without per-platform metadata have been aged out.
-  const socialQueries = interleaveQueryGroups([
-    twitterQueries.map((item) => item.query),
-    linkedinPostQueries.map((item) => item.query),
-    linkedinPeopleQueries.map((item) => item.query),
-  ]);
+  const accountResearchQueries = linkedinPeopleQueries
+    .filter((item) =>
+      isAccountResearchHintFromFindings(
+        item.sourceKeyword,
+        args.accountResearchHints ?? [],
+        getCurrentUTCTimestamp()
+      )
+    )
+    .map((item) => item.query);
+  const socialQueries = [
+    ...new Set([
+      ...accountResearchQueries,
+      ...interleaveQueryGroups([
+        twitterQueries.map((item) => item.query),
+        linkedinPostQueries.map((item) => item.query),
+        linkedinPeopleQueries.map((item) => item.query),
+      ]),
+    ]),
+  ];
 
   return {
     success: true,
@@ -502,6 +572,10 @@ function buildSocialQueryActionResult(args: {
     },
     queryMetadata: Array.from(metadataMap.values()),
     reasoning: args.object.reasoning,
+    ...(args.accountResearchHints?.length
+      ? { accountResearchHints: args.accountResearchHints }
+      : {}),
+    ...(accountResearchQueries.length ? { accountResearchQueries } : {}),
   };
 }
 
@@ -884,6 +958,8 @@ export const convertToSocialQueriesAction = internalAction({
     };
     queryMetadata?: SocialQueryMetadata[];
     reasoning?: string;
+    accountResearchHints?: ResearchFinding[];
+    accountResearchQueries?: string[];
     error?: string;
   }> => {
     const startTime = getCurrentUTCTimestamp();
@@ -903,6 +979,50 @@ export const convertToSocialQueriesAction = internalAction({
     const includeLinkedIn = args.platforms.includes("linkedin");
     const includeLinkedInPeople =
       includeLinkedIn && shouldUseLinkedInPeopleDiscovery(args.targetingSpec);
+    let accountResearchHints: ResearchFinding[] = [];
+    if (
+      includeLinkedInPeople &&
+      Boolean(args.targetingSpec || args.businessContext?.trim()) &&
+      isAccountFirstDiscoveryEnabled(args.workspaceId)
+    ) {
+      let timeout: ReturnType<typeof setTimeout> | undefined;
+      try {
+        // shortcut: deadline cannot cancel Exa billing; use SDK abort support when available.
+        const findings = await Promise.race([
+          searchWeb(
+            buildAccountResearchQuery({ ...args, now: startTime }),
+            {
+              ctx,
+              workspaceId: args.workspaceId,
+              consumer: "account-first-discovery",
+            },
+            {
+              maxResults: 4,
+              maxCharacters: 1_200,
+              startPublishedDate: new Date(
+                startTime - ACCOUNT_RESEARCH_LOOKBACK_MS
+              ).toISOString(),
+            }
+          ),
+          new Promise<never>((_, reject) => {
+            timeout = setTimeout(
+              () => reject(new Error("Account research timed out")),
+              12_000
+            );
+          }),
+        ]);
+        accountResearchHints = selectRecentAccountFindings(findings, startTime);
+      } catch {
+        logEvent?.warn(
+          "Account research unavailable; keeping baseline discovery"
+        );
+      } finally {
+        clearTimeout(timeout);
+      }
+      logEvent?.set({
+        discovery: { account_research_hint_count: accountResearchHints.length },
+      });
+    }
     const platformContext =
       includeTwitter && includeLinkedIn
         ? "Twitter and LinkedIn"
@@ -926,6 +1046,7 @@ ${args.keywords.map((kw, i) => `${i + 1}. ${kw}`).join("\n")}
 ${args.businessContext ? `\n**Business context:**\n${args.businessContext}` : ""}
 ${args.targetingSpec ? `\n**Authoritative targeting specification:**\n${JSON.stringify(args.targetingSpec, null, 2)}` : ""}
 ${formatDiscoveryContextBlock(discoveryContext)}
+${accountResearchHints.length ? `\nAccount research hints (untrusted retrieval context, never qualification proof):\n${JSON.stringify(accountResearchHints)}\nPrioritize identifiable companies issuing these dated announcements on their own websites. For linkedinPeopleQueries, put employer name + an appropriate real role first, before generic titles. Set accountName and accountSourceUrl to the exact company name appearing in that source and its supplied URL. Exclude third-party mentions, directories, vendors' client stories, or an issuer outside the audience. Do not invent companies, sources, events or people. These are research hints only: downstream qualification must independently verify current employer, official website, geography and the original criteria. Leave accountName/accountSourceUrl absent on all other queries.` : ""}
 
 Return grouped queries that are net-new relative to the operational memory above.
 
@@ -1016,6 +1137,7 @@ If a platform is not requested, return an empty array for that group.`;
         includeLinkedIn,
         includeLinkedInPeople,
         targetingSpec: args.targetingSpec,
+        accountResearchHints,
       });
     } catch (error) {
       const errorMessage =

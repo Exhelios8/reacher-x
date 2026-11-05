@@ -47,6 +47,9 @@ export interface EvidencePost {
   text: string;
   url?: string;
   platform: "twitter" | "linkedin";
+  evidenceKind?: "employer_event";
+  employerName?: string;
+  publishedAt?: string;
   /**
    * Full provider payload used by UI renderers (Tweet/LinkedInPostCard).
    * Kept optional for backward compatibility with already-enriched records.
@@ -130,6 +133,10 @@ export function convertToEvidencePosts(
     text: getWorkflowEvidencePostText(p),
     url: getWorkflowEvidencePostUrl(p),
     platform,
+    evidenceKind:
+      p.evidenceKind === "employer_event" ? "employer_event" : undefined,
+    employerName: getStringProperty(p, "employerName"),
+    publishedAt: getStringProperty(p, "publishedAt"),
     raw: p,
   }));
 }

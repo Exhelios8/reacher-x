@@ -36,6 +36,7 @@ export async function evaluateQualificationWithExternalArticles(
   let evidencePosts = args.evidencePosts;
   let profileData = args.profileData;
   let profileEvidence: QualificationCoreParams["profileEvidence"];
+  let employerEvidence: QualificationCoreParams["employerEvidence"];
   const prospect = await ctx.runQuery(internal.prospects.getProspectInternal, {
     prospectId: args.prospectId,
   });
@@ -50,6 +51,7 @@ export async function evaluateQualificationWithExternalArticles(
   if (acquired) {
     profileData = acquired.profileData;
     evidencePosts = acquired.evidencePosts;
+    employerEvidence = acquired.employerEvidence;
     const url = typeof profileData.url === "string" ? profileData.url : "";
     const authorId = typeof profileData.urn === "string" ? profileData.urn : "";
     const text = getQualificationProfileText(profileData);
@@ -105,6 +107,7 @@ export async function evaluateQualificationWithExternalArticles(
     evidencePosts,
     profileData,
     profileEvidence,
+    employerEvidence,
     externalArticles,
     telemetry: {
       ctx,

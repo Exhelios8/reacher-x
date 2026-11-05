@@ -27,6 +27,7 @@ import {
   passesQualificationGate,
   hasVerifiedGoalConflict,
   compactQualificationSourcesForWorkflow,
+  MAX_EMPLOYER_EVENTS,
   type QualificationSource,
   type QualificationExternalArticle,
   type QualificationVerification,
@@ -88,7 +89,14 @@ const llmQualificationSchema = z.object({
         verdict: z.enum(["matched", "partial", "not_matched", "unknown"]),
         confidence: z.number().min(0).max(1),
         rationale: z.string().max(1_000),
-        candidateIds: z.array(z.string().max(120)).max(MAX_EVIDENCE_POSTS + 1),
+        candidateIds: z
+          .array(z.string().max(120))
+          .max(MAX_EVIDENCE_POSTS + MAX_EMPLOYER_EVENTS + 1),
+        employerEventSupport: z
+          .enum(["operational_activity", "none"])
+          .describe(
+            "operational_activity only when an employer event proves this preferred company-work criterion; never personal intent, budget, authority, role, refusal, or a mandatory criterion. Otherwise none."
+          ),
       })
     )
     .max(12),
@@ -106,9 +114,14 @@ const llmQualificationSchema = z.object({
         candidateId: z.string().max(120),
         supportsQualification: z.boolean(),
         supportingQuote: z.string().max(1_000),
+        attributedToEmployer: z
+          .boolean()
+          .describe(
+            "For employer_event, true only when the exact quote describes the verified employer's own operational event. Guest posts, customer stories, forums, generic advice and mere employer name mentions are not employer events. False for personal sources."
+          ),
       })
     )
-    .max(MAX_EVIDENCE_POSTS + 1),
+    .max(MAX_EVIDENCE_POSTS + MAX_EMPLOYER_EVENTS + 1),
 });
 
 export interface AuthenticityResult {
@@ -252,6 +265,8 @@ export interface QualificationCoreParams {
   platform: "twitter" | "linkedin";
   evidencePosts: Array<Record<string, unknown>>;
   externalArticles?: QualificationExternalArticle[];
+  /** Only the independently verified discovery collector may supply employer provenance. */
+  employerEvidence?: Record<string, unknown>;
   discoveryQueries: string[];
   totalKeywords: number;
   profileData: Record<string, unknown>;
@@ -278,6 +293,7 @@ export async function qualifyProspectCore(
     platform,
     evidencePosts,
     externalArticles,
+    employerEvidence,
     profileEvidence,
     discoveryQueries,
     profileData,
@@ -301,6 +317,8 @@ export async function qualifyProspectCore(
     profileData,
     discoveryQueries,
     externalArticles,
+    employerEvidence,
+    now,
   });
 
   if (
@@ -356,7 +374,7 @@ export async function qualifyProspectCore(
       }),
       authenticity: { isLikelyBot: false, flags: [] },
       reasoning:
-        "No persisted, prospect-authored source with text, a stable ID, and a URL was available.",
+        "No verified personal source or official employer event was available.",
     };
   }
 
@@ -366,15 +384,18 @@ export async function qualifyProspectCore(
       const reposts = getWorkflowEvidencePostRepostCount(candidate.sourcePost);
       return [
         `Candidate ID: ${candidate.candidateId}`,
-        `Source post ID: ${candidate.sourceId}`,
+        `Source ID: ${candidate.sourceId}`,
         `Source type: ${candidate.contentType}`,
         `Source URL: ${candidate.sourceUrl}`,
         `Evidence kind: ${candidate.evidenceKind}`,
-        candidate.evidenceUrl
-          ? `Linked article URL: ${candidate.evidenceUrl}`
+        candidate.employerName
+          ? `Company issuer: ${candidate.employerName}; author is the employer, not the prospect.`
           : null,
+        candidate.evidenceUrl ? `Evidence URL: ${candidate.evidenceUrl}` : null,
         `Published: ${candidate.publishedAt ?? "unknown"}`,
-        `Engagement: ${likes} likes/reactions, ${reposts} reposts`,
+        candidate.evidenceKind === "employer_event"
+          ? "Not personal social activity."
+          : `Engagement: ${likes} likes/reactions, ${reposts} reposts`,
         `Persisted text: ${JSON.stringify(candidate.text)}`,
       ]
         .filter((line): line is string => typeof line === "string")
@@ -403,7 +424,7 @@ ${discoveryQueries.join(", ") || "None"}
 ${JSON.stringify(profileData, null, 2)}
 \`\`\`
 
-## Persisted Prospect-Authored Candidate Sources
+## Persisted Candidate Sources and Their Attribution
 ${sourcesContext}
 
 For every candidate source, return one evidenceDecisions entry using its exact Candidate ID.
@@ -413,10 +434,13 @@ When false, supportingQuote must be an empty string.
 
 Profile candidates describe responsibilities, not dated activity. They may support evidence=profile/either criteria, never activity-only criteria. Do not infer recency, intent, or responsibilities from a generic job title alone.
 
+Employer_event candidates are dated pages on the independently verified current employer's official site. They are company-attributed sources, NEVER statements or posts by the prospect. Set attributedToEmployer=true only if the exact quoted passage concerns that employer's own operational event, not a guest, customer, marketplace member or generic advice. They may support preferred operational-work or timing criteria with employerEventSupport=operational_activity. They NEVER establish individual buying intent, budget, authority, role, a mandatory criterion, an exclusion or a goal contradiction. Those need independent personal/profile evidence. A company announcement is a reason to investigate, not confirmation of purchase or outsourcing.
+The publication date is not automatically the event date. A recently published retrospective about old work is not current work. Timing needs a quoted passage identifying a recent, ongoing or dated future operation; do not infer current activity from a homepage fetch, headcount or an expired tender. If event timing is unclear, keep timing unknown.
+
 First complete goalAssessment: separate factual audience matches from usefulness for the user's intended contact. Explicit refusal of the offered service can contradict that goal even if the author matches every audience attribute. Evaluate the whole text, including stylized Unicode and non-English text. Record the exact conflicting quote and candidate ID. Missing proof that someone wants the service is merely unknown, NOT a contradiction. Missing preferred geography or format is NOT a goal contradiction. Do not invent universal exclusions for professions, employers, or satisfied product users.
 
 Return exactly one criterionResults entry for every targeting criterion ID.
-- matched means the available profile or prospect-authored evidence directly satisfies the criterion.
+- matched means the available profile or correctly attributed candidate evidence directly satisfies the criterion, within the source restrictions above.
 - partial means there is genuine but incomplete support.
 - For a required role, authority, affiliation, or relationship, evidence of participation alone is partial unless it establishes the specific requested relationship. First-person company language is evidence of involvement, not by itself proof of an unmentioned title or final decision authority. A preferred relationship can remain partial and still be useful. Apply this distinction consistently without assuming a title from an announcement.
 - not_matched means the available evidence directly contradicts or fails the criterion.
@@ -494,30 +518,66 @@ Evaluate this prospect against the ICP.`;
     );
     const criterionResults = reconcileQualificationCriterionResults({
       spec: targetingSpec,
-      results: object.criterionResults.map((result) => ({
-        criterionId: result.criterionId,
-        verdict: result.verdict,
-        confidence: result.confidence,
-        rationale: result.rationale,
-        sourceIds: Array.from(
-          new Set(
-            result.candidateIds
-              .filter(
-                (candidateId) =>
-                  targetingSpec.criteria.find(
-                    (c) => c.id === result.criterionId
-                  )?.evidence !== "activity" ||
-                  candidates.find((c) => c.candidateId === candidateId)
-                    ?.evidenceKind !== "profile"
-              )
-              .map((candidateId) => candidateSourceIdById.get(candidateId))
-              .filter(
-                (sourceId): sourceId is string =>
-                  sourceId !== undefined && verifiedSourceIds.has(sourceId)
-              )
-          )
-        ),
-      })),
+      results: object.criterionResults.map((result) => {
+        const criterion = targetingSpec.criteria.find(
+          (c) => c.id === result.criterionId
+        );
+        const referencedCandidates = candidates.filter(
+          (candidate) =>
+            result.candidateIds.includes(candidate.candidateId) &&
+            verifiedSourceIds.has(candidate.sourceId)
+        );
+        const employerOnly =
+          referencedCandidates.length > 0 &&
+          referencedCandidates.every(
+            (candidate) => candidate.evidenceKind === "employer_event"
+          );
+        // shortcut: mandatory company events need an explicit criterion subject before support.
+        const allowsEmployerEvent =
+          criterion?.kind === "preferred" &&
+          criterion.evidence !== "profile" &&
+          criterion.category !== "profile_fit" &&
+          result.employerEventSupport === "operational_activity";
+        const noIndependentProfile =
+          candidates.some(
+            (candidate) => candidate.evidenceKind === "employer_event"
+          ) &&
+          !candidates.some(
+            (candidate) => candidate.evidenceKind === "profile"
+          ) &&
+          result.candidateIds.length === 0;
+        const unsupportedEmployerBasis =
+          (employerOnly && !allowsEmployerEvent) || noIndependentProfile;
+        return {
+          criterionId: result.criterionId,
+          verdict: unsupportedEmployerBasis ? "unknown" : result.verdict,
+          confidence: unsupportedEmployerBasis ? 0 : result.confidence,
+          rationale: unsupportedEmployerBasis
+            ? `${result.rationale} An employer event cannot establish this personal or mandatory criterion.`
+            : result.rationale,
+          sourceIds: Array.from(
+            new Set(
+              result.candidateIds
+                .filter(
+                  (candidateId) =>
+                    (candidates.find((c) => c.candidateId === candidateId)
+                      ?.evidenceKind !== "employer_event" ||
+                      allowsEmployerEvent) &&
+                    (targetingSpec.criteria.find(
+                      (c) => c.id === result.criterionId
+                    )?.evidence !== "activity" ||
+                      candidates.find((c) => c.candidateId === candidateId)
+                        ?.evidenceKind !== "profile")
+                )
+                .map((candidateId) => candidateSourceIdById.get(candidateId))
+                .filter(
+                  (sourceId): sourceId is string =>
+                    sourceId !== undefined && verifiedSourceIds.has(sourceId)
+                )
+            )
+          ),
+        };
+      }),
     });
     const targetingScore = calculateTargetingQualificationScore({
       spec: targetingSpec,

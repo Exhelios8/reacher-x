@@ -20,6 +20,7 @@ import { UI_PREVIEW_LINKEDIN_THREAD_SCENARIOS } from "@/features/prospects/lib/u
 import { cn } from "@/shared/lib/utils";
 import { normalizeLinkedInPost } from "@/shared/lib/linkedin/post";
 import { shouldIgnorePostCardClick } from "@/features/webapp/lib/postNavigation";
+import { isEmployerEventEvidence } from "../../lib/prospectEvidence";
 
 const EMPTY_POSTS: unknown[] = [];
 
@@ -50,13 +51,14 @@ export function EvidencePostsList({
   const [openLinkedInPostId, setOpenLinkedInPostId] = React.useState<
     string | null
   >(null);
-  const normalizedPosts = React.useMemo(
-    () =>
-      platform === "linkedin"
-        ? posts.map((post) => normalizeLinkedInPost(post) ?? post)
-        : posts,
-    [platform, posts]
-  );
+  const normalizedPosts = React.useMemo(() => {
+    const personalPosts = posts.filter(
+      (post) => !isEmployerEventEvidence(post)
+    );
+    return platform === "linkedin"
+      ? personalPosts.map((post) => normalizeLinkedInPost(post) ?? post)
+      : personalPosts;
+  }, [platform, posts]);
   const dedupedPosts = React.useMemo(
     () => dedupePosts(normalizedPosts),
     [normalizedPosts]

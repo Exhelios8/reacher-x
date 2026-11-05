@@ -26,6 +26,7 @@ import {
 import { toFallbackTweetFromSummary } from "@/shared/lib/twitter/ui";
 import { UI_PREVIEW_LINKEDIN_THREAD_SCENARIOS } from "@/features/prospects/lib/uiPreviewData";
 import { normalizeLinkedInPost } from "@/shared/lib/linkedin/post";
+import { isEmployerEventEvidence } from "../../../lib/prospectEvidence";
 
 // ============================================================================
 // Types
@@ -68,7 +69,9 @@ export function RelevantActivityTab({
 
   // Use evidence posts from props
   const allPosts = React.useMemo(() => {
-    const posts = (evidencePosts as unknown[]) || [];
+    const posts = (evidencePosts ?? []).filter(
+      (post) => !isEmployerEventEvidence(post)
+    );
     return dedupePosts(
       platform === "linkedin"
         ? posts.map((post) => normalizeLinkedInPost(post) ?? post)

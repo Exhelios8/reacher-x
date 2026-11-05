@@ -1415,19 +1415,20 @@ export const qualificationSourceContentTypeValidator = v.union(
   v.literal("post"),
   v.literal("reply"),
   v.literal("quote_post"),
-  v.literal("profile")
+  v.literal("profile"),
+  v.literal("employer_event")
 );
 
 /**
- * A prospect-authored social source that passed deterministic authorship and
- * quote validation after the semantic qualification check.
+ * A verified personal source or separately attributed official employer event.
  */
 export const qualificationSourceValidator = v.object({
   verificationVersion: v.literal(1),
   evidenceKind: v.union(
     v.literal("social_content"),
     v.literal("external_article"),
-    v.literal("profile")
+    v.literal("profile"),
+    v.literal("employer_event")
   ),
   platform: prospectPlatformValidator,
   contentType: qualificationSourceContentTypeValidator,
@@ -1435,6 +1436,7 @@ export const qualificationSourceValidator = v.object({
   sourceUrl: v.string(),
   evidenceUrl: v.optional(v.string()),
   authorId: v.string(),
+  employerName: v.optional(v.string()),
   text: v.string(),
   publishedAt: v.optional(v.string()),
   discoveryQueries: v.array(v.string()),

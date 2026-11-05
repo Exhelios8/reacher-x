@@ -169,7 +169,13 @@ function extractVerifiedQualificationEvidenceHighlights(
   return (prospect.qualificationSources ?? [])
     .flatMap((source) => {
       const quote = source.supportingQuote.trim();
-      return quote ? [quote] : [];
+      return quote
+        ? [
+            source.evidenceKind === "employer_event"
+              ? `Official employer event (${source.employerName ?? "company"}), not a personal statement. ${source.evidenceUrl ?? source.sourceUrl}: ${quote}`
+              : quote,
+          ]
+        : [];
     })
     .slice(0, 5);
 }

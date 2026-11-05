@@ -153,13 +153,29 @@ export async function indexEvidencePosts(
     }
 
     try {
-      const contentHash = buildContentHashFromText(post.text);
+      const text =
+        post.evidenceKind === "employer_event"
+          ? `Official employer event: ${post.employerName ?? "verified employer"}. Company context, not a personal post; no individual buying intent, budget or authority is established.\nPublished: ${post.publishedAt ?? "unknown"}\nSource: ${post.url ?? "unknown"}\n${post.text}`
+          : post.text;
+      const contentHash = buildContentHashFromText(text);
       await getProspectRag().add(ctx, {
         namespace,
         key: `evidence:${post.id || contentHash}`,
-        text: post.text,
+        text,
         contentHash,
-        filterValues: [{ name: "contentType", value: "evidence_post" }],
+        metadata:
+          post.evidenceKind === "employer_event"
+            ? { source: post.url, type: "employer_event" }
+            : undefined,
+        filterValues: [
+          {
+            name: "contentType",
+            value:
+              post.evidenceKind === "employer_event"
+                ? "employer_event"
+                : "evidence_post",
+          },
+        ],
       });
       indexed++;
     } catch (error) {

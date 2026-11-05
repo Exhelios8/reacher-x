@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, test, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import type { ActionCtx } from "../_generated/server";
 import type { Doc } from "../_generated/dataModel";
 import {
@@ -6,10 +6,20 @@ import {
   getQualificationProfileText,
 } from "./qualificationDiscoveryEvidenceCore";
 import { prepareQualificationCandidates } from "./qualificationEvidenceCore";
-import { readWebPages } from "./researchCore";
+import { readWebPages, searchWeb } from "./researchCore";
+import { getLearningTargetingFingerprint } from "./learningTargetingHelpers";
+import { buildLegacyWorkspaceTargetingSpec } from "./targetingSpecCore";
 
-vi.mock("./researchCore", () => ({ readWebPages: vi.fn() }));
-beforeEach(() => vi.mocked(readWebPages).mockReset().mockResolvedValue([]));
+vi.mock("./researchCore", () => ({
+  readWebPages: vi.fn(),
+  searchWeb: vi.fn(),
+}));
+beforeEach(() => {
+  vi.stubEnv("ACCOUNT_FIRST_DISCOVERY_WORKSPACE_IDS", "workspace");
+  vi.mocked(readWebPages).mockReset().mockResolvedValue([]);
+  vi.mocked(searchWeb).mockReset().mockResolvedValue([]);
+});
+afterEach(() => vi.unstubAllEnvs());
 
 const prospect = {
   _id: "prospect",
@@ -153,12 +163,20 @@ describe("people-search qualification evidence acquisition", () => {
     const mock = context();
     const result = await collectQualificationDiscoveryEvidence(mock.ctx, {
       ...prospect,
-      qualificationProfileData: { ...profile, qualificationContextVersion: 2 },
+      qualificationProfileData: {
+        ...profile,
+        qualificationContextVersion: 2,
+        qualificationTargetingFingerprint: getLearningTargetingFingerprint({
+          description: "Find educators",
+          icps: [],
+        }),
+      },
       qualificationEvidenceFetchedAt: 1,
     });
     expect(result?.profileData).toEqual({
       ...profile,
       qualificationContextVersion: 2,
+      qualificationTargetingFingerprint: expect.any(String),
     });
     expect(mock.runAction).not.toHaveBeenCalled();
   });
@@ -236,6 +254,7 @@ describe("verified current employer context", () => {
     vi.mocked(readWebPages).mockResolvedValueOnce([
       {
         url: company.website,
+        finalUrl: company.website,
         title: "Courses",
         snippet: "Official commercial software description.",
       },
@@ -391,6 +410,7 @@ describe("verified current employer context", () => {
     const mock = context();
     const officialWebsiteEvidence = {
       url: "https://www.courses.example/mentions-legales",
+      finalUrl: "https://www.courses.example/mentions-legales",
       retrievedAt: "2026-11-03T20:00:00Z",
       text: "Courses SAS, registered in France.",
     };
@@ -509,6 +529,239 @@ describe("verified current employer context", () => {
     ).toBeNull();
     expect(mock.runAction).not.toHaveBeenCalled();
   });
+
+  test("disabled workspaces keep legacy cache and make no employer-event request", async () => {
+    vi.stubEnv("ACCOUNT_FIRST_DISCOVERY_WORKSPACE_IDS", "another-workspace");
+    const mock = context();
+    const targetingSpec = buildLegacyWorkspaceTargetingSpec({
+      description: "Find current catalogue migrations",
+      profiles: [],
+    });
+    vi.mocked(mock.ctx.runQuery).mockResolvedValue({
+      description: targetingSpec.summary,
+      targetingSpec,
+      icps: [],
+    });
+    const result = await collectQualificationDiscoveryEvidence(mock.ctx, {
+      ...socialProspect,
+      qualificationEvidenceFetchedAt: 1,
+      qualificationProfileData: { ...profile, qualificationContextVersion: 2 },
+    });
+    expect(result?.profileData.qualificationContextVersion).toBe(2);
+    expect(result?.employerEvidence).toBeUndefined();
+    expect(mock.runAction).not.toHaveBeenCalled();
+    expect(searchWeb).not.toHaveBeenCalled();
+  });
+
+  test("optional event failure preserves social proof and retries only after its bounded delay", async () => {
+    const mock = context();
+    const targetingSpec = buildLegacyWorkspaceTargetingSpec({
+      description: "Find current catalogue migrations",
+      profiles: [],
+    });
+    vi.mocked(mock.ctx.runQuery).mockResolvedValue({
+      description: targetingSpec.summary,
+      targetingSpec,
+      icps: [],
+    });
+    mock.runAction
+      .mockReset()
+      .mockResolvedValueOnce({ success: true, profile: employerProfile })
+      .mockResolvedValueOnce({ success: true, company });
+    vi.mocked(searchWeb).mockRejectedValueOnce(new Error("429 rate limited"));
+    const sourcePost = {
+      id: "request",
+      text: "I need help",
+      author: { urn: "ACo123" },
+    };
+    const result = await collectQualificationDiscoveryEvidence(mock.ctx, {
+      ...socialProspect,
+      evidencePosts: [sourcePost],
+    });
+    expect(result?.evidencePosts).toEqual([sourcePost]);
+    expect(result?.employerEvidence).toMatchObject({
+      events: [],
+      eventSearchError: expect.stringContaining("429"),
+      eventRetryAfter: expect.any(Number),
+    });
+    mock.runAction.mockClear();
+    await collectQualificationDiscoveryEvidence(mock.ctx, {
+      ...socialProspect,
+      evidencePosts: [sourcePost],
+      qualificationProfileData: result!.profileData,
+      qualificationEvidenceFetchedAt: Date.now(),
+    });
+    expect(mock.runAction).not.toHaveBeenCalled();
+    mock.runAction
+      .mockResolvedValueOnce({ success: true, profile: employerProfile })
+      .mockResolvedValueOnce({ success: true, company });
+    await collectQualificationDiscoveryEvidence(mock.ctx, {
+      ...socialProspect,
+      qualificationProfileData: {
+        ...result!.profileData,
+        employerEvidence: {
+          ...result!.employerEvidence,
+          eventRetryAfter: Date.now() - 1,
+        },
+      },
+      qualificationEvidenceFetchedAt: Date.now(),
+    });
+    expect(mock.runAction).toHaveBeenCalledTimes(2);
+    expect(searchWeb).toHaveBeenCalledTimes(2);
+  });
+
+  test.each(["stale", "different-person"])(
+    "refreshes an enabled %s verified-employer cache",
+    async (failure) => {
+      const mock = context();
+      const targetingSpec = buildLegacyWorkspaceTargetingSpec({
+        description: "Find current catalogue migrations",
+        profiles: [],
+      });
+      vi.mocked(mock.ctx.runQuery).mockResolvedValue({
+        description: targetingSpec.summary,
+        targetingSpec,
+        icps: [],
+      });
+      mock.runAction
+        .mockReset()
+        .mockResolvedValueOnce({ success: true, profile: employerProfile })
+        .mockResolvedValueOnce({ success: true, company });
+      const result = await collectQualificationDiscoveryEvidence(
+        mock.ctx,
+        socialProspect
+      );
+      mock.runAction
+        .mockReset()
+        .mockResolvedValueOnce({ success: true, profile: employerProfile })
+        .mockResolvedValueOnce({ success: true, company });
+      await collectQualificationDiscoveryEvidence(mock.ctx, {
+        ...socialProspect,
+        qualificationProfileData: {
+          ...result!.profileData,
+          ...(failure === "different-person" ? { urn: "another-person" } : {}),
+        },
+        qualificationEvidenceFetchedAt:
+          failure === "stale" ? Date.now() - 2 * 86_400_000 : Date.now(),
+      });
+      expect(mock.runAction).toHaveBeenCalledTimes(2);
+    }
+  );
+
+  test("scopes one bounded event search to the verified employer and reads dated official sources separately", async () => {
+    const mock = context();
+    const targetingSpec = buildLegacyWorkspaceTargetingSpec({
+      description: "Find educators migrating learning catalogues",
+      profiles: [],
+    });
+    vi.mocked(mock.ctx.runQuery).mockResolvedValue({
+      description: targetingSpec.summary,
+      targetingSpec,
+      icps: [],
+    });
+    mock.runAction
+      .mockReset()
+      .mockResolvedValueOnce({ success: true, profile: employerProfile })
+      .mockResolvedValueOnce({ success: true, company });
+    const publishedDate = new Date(Date.now() - 86_400_000).toISOString();
+    const url = `${company.website}/news/catalogue-migration`;
+    vi.mocked(searchWeb).mockResolvedValue([
+      {
+        url,
+        title: "Catalogue migration",
+        snippet: "Search excerpt is not the source",
+        publishedDate,
+      },
+    ]);
+    vi.mocked(readWebPages)
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([
+        {
+          url,
+          finalUrl: url,
+          title: "Catalogue migration",
+          snippet: "Courses is migrating its learning catalogue.",
+          publishedDate,
+        },
+      ]);
+    const result = await collectQualificationDiscoveryEvidence(
+      mock.ctx,
+      socialProspect
+    );
+    expect(searchWeb).toHaveBeenCalledExactlyOnceWith(
+      expect.stringContaining("educators"),
+      expect.objectContaining({ consumer: "qualification.employer_events" }),
+      expect.objectContaining({
+        includeDomains: ["courses.example"],
+        maxResults: 2,
+        startPublishedDate: expect.any(String),
+      })
+    );
+    expect(result?.evidencePosts).toEqual([]);
+    expect(result?.profileData.employerEvidence).toMatchObject({
+      events: [
+        {
+          companyId: "42",
+          url,
+          finalUrl: url,
+          publishedAt: publishedDate,
+          text: "Courses is migrating its learning catalogue.",
+        },
+      ],
+    });
+    expect(getQualificationProfileText(result!.profileData)).not.toContain(
+      "migrating"
+    );
+  });
+
+  test.each([
+    { finalUrl: "https://unrelated.example/news" },
+    { publishedDate: undefined },
+    { publishedDate: "2025-01-01" },
+    { publishedDate: "2099-01-01" },
+  ])(
+    "rejects an uncorroborated publication or an offsite redirect: %j",
+    async (override) => {
+      const mock = context();
+      const targetingSpec = buildLegacyWorkspaceTargetingSpec({
+        description: "Find current catalogue migrations",
+        profiles: [],
+      });
+      vi.mocked(mock.ctx.runQuery).mockResolvedValue({
+        description: targetingSpec.summary,
+        targetingSpec,
+        icps: [],
+      });
+      mock.runAction
+        .mockReset()
+        .mockResolvedValueOnce({ success: true, profile: employerProfile })
+        .mockResolvedValueOnce({ success: true, company });
+      const publishedDate = new Date(Date.now() - 86_400_000).toISOString();
+      const url = `${company.website}/news`;
+      vi.mocked(searchWeb).mockResolvedValue([
+        { url, title: "Migration", snippet: "Search excerpt", publishedDate },
+      ]);
+      vi.mocked(readWebPages)
+        .mockResolvedValueOnce([])
+        .mockResolvedValueOnce([
+          {
+            url,
+            finalUrl: url,
+            title: "Migration",
+            snippet: "Courses is migrating its learning catalogue.",
+            publishedDate,
+            ...override,
+          },
+        ]);
+      const result = await collectQualificationDiscoveryEvidence(
+        mock.ctx,
+        socialProspect
+      );
+      expect(result?.profileData.employerEvidence).toMatchObject({
+        events: [],
+      });
+    }
+  );
 
   test("read-only re-evaluation of an already decided prospect does not overwrite its cache", async () => {
     const mock = context();

@@ -10,8 +10,14 @@ import {
 } from "../integrations/linkedin/profileIdentity";
 import { getLearningTargetingFingerprint } from "./learningTargetingHelpers";
 import { getCurrentUTCTimestamp } from "../../shared/lib/utils/time/timeUtils";
-import { readWebPages } from "./researchCore";
+import { readWebPages, searchWeb } from "./researchCore";
+import {
+  EMPLOYER_EVENT_MAX_AGE_MS,
+  MAX_EMPLOYER_EVENTS,
+  sameQualificationWebsiteHost as sameWebsiteHost,
+} from "./qualificationEvidenceCore";
 import { classifyProviderFailure } from "./providerReliability";
+import { isAccountFirstDiscoveryEnabled } from "./accountFirstDiscoveryCore";
 import {
   sanitizeLinkedInProfileForWorkflow,
   sanitizeWorkflowString,
@@ -49,20 +55,6 @@ function getCurrentCompanyId(
   return ids.size === 1 && !ids.has(undefined) ? [...ids][0] : undefined;
 }
 
-function sameWebsiteHost(first: unknown, second: unknown): boolean {
-  if (typeof first !== "string" || typeof second !== "string") return false;
-  try {
-    const a = new URL(first);
-    const b = new URL(second);
-    return (
-      [a, b].every((url) => ["http:", "https:"].includes(url.protocol)) &&
-      a.hostname.replace(/^www\./, "") === b.hostname.replace(/^www\./, "")
-    );
-  } catch {
-    return false;
-  }
-}
-
 /** Bounded person/employer evidence acquisition before any LinkedIn fit verdict. */
 export async function collectQualificationDiscoveryEvidence(
   ctx: ActionCtx,
@@ -70,6 +62,7 @@ export async function collectQualificationDiscoveryEvidence(
 ): Promise<{
   profileData: Record<string, unknown>;
   evidencePosts: Record<string, unknown>[];
+  employerEvidence?: Record<string, unknown>;
 } | null> {
   if (
     prospect.platform !== "linkedin" ||
@@ -98,26 +91,72 @@ export async function collectQualificationDiscoveryEvidence(
     )
   )
     return null;
-  if (
-    isRecord(prospect.qualificationProfileData) &&
-    prospect.qualificationEvidenceFetchedAt &&
-    prospect.qualificationProfileData.qualificationContextVersion === 2
-  ) {
-    return {
-      profileData: prospect.qualificationProfileData,
-      evidencePosts: (prospect.evidencePosts ?? []).filter(isRecord),
-    };
-  }
-  const identifiers = resolveLinkedInProspectProfileIdentifiers(prospect);
-  if (!identifiers.username && !identifiers.profileUrn)
-    throw new Error(
-      "[QualificationEvidence] LinkedIn profile identity unavailable"
-    );
   const workspace = await ctx.runQuery(internal.workspaces.getById, {
     workspaceId: prospect.workspaceId,
   });
   if (!workspace)
     throw new Error("[QualificationEvidence] Workspace no longer exists");
+  const targetingFingerprint = getLearningTargetingFingerprint(workspace);
+  const eventCriteria =
+    workspace.targetingSpec?.criteria.filter(
+      (criterion) =>
+        criterion.kind === "preferred" &&
+        criterion.evidence !== "profile" &&
+        criterion.category !== "profile_fit"
+    ) ?? [];
+  const employerEventsEnabled =
+    isAccountFirstDiscoveryEnabled(prospect.workspaceId) &&
+    eventCriteria.length > 0;
+  const contextVersion = employerEventsEnabled ? 3 : 2;
+  const cachedData = prospect.qualificationProfileData;
+  const cachedEmployer =
+    isRecord(cachedData) && isRecord(cachedData.employerEvidence)
+      ? cachedData.employerEvidence
+      : undefined;
+  const identifiers = resolveLinkedInProspectProfileIdentifiers(prospect);
+  const cacheIdentityMatches =
+    !employerEventsEnabled ||
+    (isRecord(cachedData) &&
+      (identifiers.profileUrn
+        ? normalizeLinkedInProfileQueryUrn(String(cachedData.urn)) ===
+          identifiers.profileUrn
+        : typeof cachedData.username === "string" &&
+          cachedData.username.toLowerCase() ===
+            identifiers.username?.toLowerCase()));
+  const cacheAgeValid =
+    !employerEventsEnabled ||
+    (typeof prospect.qualificationEvidenceFetchedAt === "number" &&
+      prospect.qualificationEvidenceFetchedAt <= getCurrentUTCTimestamp() &&
+      getCurrentUTCTimestamp() - prospect.qualificationEvidenceFetchedAt <
+        24 * 60 * 60 * 1000);
+  const eventRetryDue =
+    employerEventsEnabled &&
+    typeof cachedEmployer?.eventRetryAfter === "number" &&
+    cachedEmployer.eventRetryAfter <= getCurrentUTCTimestamp();
+  if (
+    isRecord(prospect.qualificationProfileData) &&
+    prospect.qualificationEvidenceFetchedAt &&
+    prospect.qualificationProfileData.qualificationContextVersion ===
+      contextVersion &&
+    (!employerEventsEnabled ||
+      prospect.qualificationProfileData.qualificationTargetingFingerprint ===
+        targetingFingerprint) &&
+    !eventRetryDue &&
+    cacheIdentityMatches &&
+    cacheAgeValid
+  ) {
+    return {
+      profileData: prospect.qualificationProfileData,
+      evidencePosts: (prospect.evidencePosts ?? []).filter(isRecord),
+      ...(employerEventsEnabled && cachedEmployer
+        ? { employerEvidence: cachedEmployer }
+        : {}),
+    };
+  }
+  if (!identifiers.username && !identifiers.profileUrn)
+    throw new Error(
+      "[QualificationEvidence] LinkedIn profile identity unavailable"
+    );
   const result = await ctx.runAction(
     internal.integrations.linkedin.getProfile.getProfile,
     {
@@ -155,8 +194,11 @@ export async function collectQualificationDiscoveryEvidence(
   const profileUrl = `https://www.linkedin.com/in/${encodeURIComponent(username)}`;
   const profileData: Record<string, unknown> = sanitizeWorkflowValue({
     ...sanitizeLinkedInProfileForWorkflow(profile),
-    // Refresh older caches once; they omitted employer identity and context.
-    qualificationContextVersion: 2,
+    // Older caches have no separately attributed employer event sources.
+    qualificationContextVersion: contextVersion,
+    ...(employerEventsEnabled
+      ? { qualificationTargetingFingerprint: targetingFingerprint }
+      : {}),
     // Retain actual responsibilities; the generic workflow sanitizer keeps only company names.
     position: (profile.position ?? []).slice(0, 5).map((position) => ({
       title: position.title ?? "",
@@ -210,7 +252,8 @@ export async function collectQualificationDiscoveryEvidence(
       isRecord(cachedWebsite) &&
       typeof cachedWebsite.text === "string" &&
       cachedWebsite.text.trim() &&
-      sameWebsiteHost(cachedWebsite.url, company.website)
+      sameWebsiteHost(cachedWebsite.url, company.website) &&
+      sameWebsiteHost(cachedWebsite.finalUrl, company.website)
         ? cachedWebsite
         : undefined;
     let websiteReadError: string | undefined;
@@ -222,7 +265,7 @@ export async function collectQualificationDiscoveryEvidence(
         prospectId: prospect._id,
       });
       if (page?.error) {
-        const { reason } = classifyProviderFailure(new Error(page.error));
+        const { reason } = classifyProviderFailure(page.error);
         if (
           reason === "transient" ||
           reason === "rate_limit" ||
@@ -236,25 +279,109 @@ export async function collectQualificationDiscoveryEvidence(
         websiteReadError = "No readable company website content was available.";
       }
       if (page?.snippet.trim()) {
-        if (!sameWebsiteHost(page.url, company.website))
+        if (
+          !sameWebsiteHost(page.url, company.website) ||
+          !sameWebsiteHost(page.finalUrl, company.website)
+        )
           throw new Error(
             "[QualificationEvidence] Provider returned a different company website"
           );
         officialWebsiteEvidence = {
           url: page.url,
+          finalUrl: page.finalUrl,
           retrievedAt: new Date(getCurrentUTCTimestamp()).toISOString(),
           text: page.snippet,
         };
       }
     }
-    // Company context is separate from prospect-authored profile text and social quotes.
+    const events: Record<string, unknown>[] = [];
+    let eventSearchError: string | undefined;
+    if (
+      employerEventsEnabled &&
+      eventCriteria.length &&
+      sameWebsiteHost(company.website, company.website)
+    ) {
+      const now = getCurrentUTCTimestamp();
+      const host = new URL(company.website!).hostname;
+      const query = `${company.name} ${workspace.targetingSpec?.summary.slice(0, 300)} ${eventCriteria
+        .map((criterion) =>
+          [criterion.description, ...criterion.terms].join(" ")
+        )
+        .join(" ")
+        .slice(0, 700)}`;
+      const providerContext = {
+        ctx,
+        consumer: "qualification.employer_events",
+        workspaceId: prospect.workspaceId,
+        prospectId: prospect._id,
+      };
+      try {
+        const findings = await searchWeb(query, providerContext, {
+          maxResults: MAX_EMPLOYER_EVENTS,
+          includeDomains: [host],
+          startPublishedDate: new Date(
+            now - EMPLOYER_EVENT_MAX_AGE_MS
+          ).toISOString(),
+        });
+        const urls = findings
+          .filter((finding) => {
+            const publishedAt = Date.parse(finding.publishedDate ?? "");
+            return (
+              sameWebsiteHost(finding.url, company.website) &&
+              Number.isFinite(publishedAt) &&
+              publishedAt <= now &&
+              now - publishedAt <= EMPLOYER_EVENT_MAX_AGE_MS
+            );
+          })
+          .map((finding) => finding.url)
+          .slice(0, MAX_EMPLOYER_EVENTS);
+        const pages = urls.length
+          ? await readWebPages(urls, providerContext, {
+              requirePublisherMetadata: true,
+            })
+          : [];
+        for (const page of pages) {
+          const publishedAt = Date.parse(page.publishedDate ?? "");
+          if (
+            page.error ||
+            !page.snippet.trim() ||
+            !urls.includes(page.url) ||
+            !sameWebsiteHost(page.url, company.website) ||
+            !sameWebsiteHost(page.finalUrl, company.website) ||
+            !Number.isFinite(publishedAt) ||
+            publishedAt > now ||
+            now - publishedAt > EMPLOYER_EVENT_MAX_AGE_MS
+          )
+            continue;
+          events.push({
+            evidenceKind: "employer_event",
+            companyId: employerId,
+            url: page.url,
+            finalUrl: page.finalUrl,
+            title: page.title,
+            publishedAt: page.publishedDate,
+            retrievedAt: new Date(now).toISOString(),
+            text: page.snippet,
+          });
+        }
+      } catch (error) {
+        eventSearchError = String(error).slice(0, 600);
+      }
+    }
+    // Company context and events are never added to prospect-authored social posts.
     profileData.employerEvidence = sanitizeWorkflowValue({
       companyId: employerId,
+      personUrn: urn,
       sourceUrl,
       fetchedAt: new Date(getCurrentUTCTimestamp()).toISOString(),
       relationshipSourceUrl: profileUrl,
       officialWebsiteEvidence,
       websiteReadError,
+      events,
+      eventSearchError,
+      ...(eventSearchError
+        ? { eventRetryAfter: getCurrentUTCTimestamp() + 30 * 60 * 1000 }
+        : {}),
       company: {
         name: company.name,
         description: sanitizeWorkflowString(company.description ?? "").slice(
@@ -303,7 +430,13 @@ export async function collectQualificationDiscoveryEvidence(
         evidencePosts,
       }
     );
-  return { profileData, evidencePosts };
+  return {
+    profileData,
+    evidencePosts,
+    ...(employerEventsEnabled && isRecord(profileData.employerEvidence)
+      ? { employerEvidence: profileData.employerEvidence }
+      : {}),
+  };
 }
 
 /** Real provider profile text, not search snippets or synthetic persona data. */

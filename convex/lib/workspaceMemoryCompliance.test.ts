@@ -14,7 +14,7 @@ describe("workspace memory compliance", () => {
       fallbackRouting: "onboarding",
       temperature: 0,
       maxRetries: 2,
-      maxOutputTokens: 1_000,
+      maxOutputTokens: 8_192,
       nativeStructuredOutput: true,
     });
   });

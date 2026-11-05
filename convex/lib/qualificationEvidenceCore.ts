@@ -11,6 +11,27 @@ import {
   sanitizeWorkflowString,
   sanitizeProspectEvidencePostsForWorkflow,
 } from "./workflowSafeProspect";
+import { createStableHash } from "./memoryHelpers";
+
+export const MAX_EMPLOYER_EVENTS = 2;
+export const EMPLOYER_EVENT_MAX_AGE_MS = 90 * 24 * 60 * 60 * 1000;
+
+export function sameQualificationWebsiteHost(
+  first: unknown,
+  second: unknown
+): boolean {
+  if (typeof first !== "string" || typeof second !== "string") return false;
+  try {
+    const a = new URL(first);
+    const b = new URL(second);
+    return (
+      [a, b].every((url) => ["http:", "https:"].includes(url.protocol)) &&
+      a.hostname.replace(/^www\./, "") === b.hostname.replace(/^www\./, "")
+    );
+  } catch {
+    return false;
+  }
+}
 
 /** Hydrate only selected source IDs; never add unrelated posts to an evaluation. */
 export function hydrateQualificationEvidence(args: {
@@ -76,6 +97,7 @@ export type QualificationEvidenceDecision = {
   candidateId: string;
   supportsQualification: boolean;
   supportingQuote: string;
+  attributedToEmployer?: boolean;
 };
 
 export type QualificationExternalArticle = {
@@ -87,13 +109,18 @@ export type QualificationExternalArticle = {
 
 export type QualificationCandidate = {
   candidateId: string;
-  evidenceKind: "social_content" | "external_article" | "profile";
+  evidenceKind:
+    | "social_content"
+    | "external_article"
+    | "profile"
+    | "employer_event";
   platform: "twitter" | "linkedin";
-  contentType: "post" | "reply" | "quote_post" | "profile";
+  contentType: "post" | "reply" | "quote_post" | "profile" | "employer_event";
   sourceId: string;
   sourceUrl: string;
   evidenceUrl?: string;
   authorId: string;
+  employerName?: string;
   text: string;
   publishedAt?: string;
   discoveryQueries: string[];
@@ -117,8 +144,87 @@ export function hasVerifiedGoalConflict(
   return candidates.some(
     (candidate) =>
       candidate.candidateId === assessment.candidateId &&
+      candidate.evidenceKind !== "employer_event" &&
       candidate.text.includes(assessment.conflictingQuote.trim())
   );
+}
+
+/** Employer identity comes from the independently verified current LinkedIn relationship. */
+function prepareEmployerEventCandidates(args: {
+  platform: "twitter" | "linkedin";
+  profileData: Record<string, unknown>;
+  employerEvidence?: Record<string, unknown>;
+  discoveryQueries: string[];
+  now: number;
+}): QualificationCandidate[] {
+  const employer = args.employerEvidence;
+  if (
+    args.platform !== "linkedin" ||
+    !isRecord(employer) ||
+    typeof args.profileData.urn !== "string" ||
+    !args.profileData.urn.trim() ||
+    employer.personUrn !== args.profileData.urn ||
+    typeof args.profileData.url !== "string" ||
+    !/^https:\/\/www\.linkedin\.com\/in\/[\p{L}\p{N}_%-]+\/?$/u.test(
+      args.profileData.url
+    ) ||
+    employer.relationshipSourceUrl !== args.profileData.url ||
+    !isRecord(employer.company) ||
+    typeof employer.companyId !== "string" ||
+    !/^[1-9]\d*$/.test(employer.companyId) ||
+    !Array.isArray(employer.events)
+  )
+    return [];
+  const employerName = getString(employer.company.name);
+  const company = employer.company;
+  if (!employerName) return [];
+  const seen = new Set<string>();
+  return employer.events.flatMap((event): QualificationCandidate[] => {
+    if (
+      !isRecord(event) ||
+      event.companyId !== employer.companyId ||
+      !sameQualificationWebsiteHost(event.url, company.website) ||
+      !sameQualificationWebsiteHost(event.finalUrl, company.website) ||
+      typeof event.text !== "string" ||
+      !event.text.trim() ||
+      typeof event.publishedAt !== "string"
+    )
+      return [];
+    const publishedAt = Date.parse(event.publishedAt);
+    if (
+      !Number.isFinite(publishedAt) ||
+      publishedAt > args.now ||
+      args.now - publishedAt > EMPLOYER_EVENT_MAX_AGE_MS
+    )
+      return [];
+    const sourceUrl = getString(event.url)!;
+    const evidenceUrl = getString(event.finalUrl)!;
+    const sourceId = `employer:${employer.companyId}:${createStableHash(evidenceUrl)}`;
+    if (seen.has(sourceId) || seen.size >= MAX_EMPLOYER_EVENTS) return [];
+    seen.add(sourceId);
+    return [
+      {
+        candidateId: sourceId,
+        evidenceKind: "employer_event",
+        platform: "linkedin",
+        contentType: "employer_event",
+        sourceId,
+        sourceUrl,
+        evidenceUrl,
+        authorId: `company:${employer.companyId}`,
+        employerName,
+        text: event.text.trim(),
+        publishedAt: event.publishedAt,
+        discoveryQueries: args.discoveryQueries,
+        sourcePost: {
+          ...event,
+          id: sourceId,
+          evidenceKind: "employer_event",
+          employerName,
+        },
+      },
+    ];
+  });
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -260,6 +366,8 @@ export function prepareQualificationCandidates(args: {
   profileData: Record<string, unknown>;
   discoveryQueries: string[];
   externalArticles?: QualificationExternalArticle[];
+  employerEvidence?: Record<string, unknown>;
+  now?: number;
 }): QualificationCandidate[] {
   const profileAuthorIds = getProfileAuthorIds(args.profileData);
   if (profileAuthorIds.size === 0) {
@@ -268,7 +376,11 @@ export function prepareQualificationCandidates(args: {
 
   const discoveryQueries = dedupeStrings(args.discoveryQueries);
   const seen = new Set<string>();
-  const candidates: QualificationCandidate[] = [];
+  const candidates: QualificationCandidate[] = prepareEmployerEventCandidates({
+    ...args,
+    discoveryQueries,
+    now: args.now ?? Date.now(),
+  });
 
   for (const post of args.evidencePosts) {
     const sourceId = getWorkflowEvidencePostId(post);
@@ -366,6 +478,8 @@ export function buildVerifiedQualificationSources(args: {
     const supportingQuote = decision.supportingQuote.trim();
     if (
       !candidate ||
+      (candidate.evidenceKind === "employer_event" &&
+        !decision.attributedToEmployer) ||
       !supportingQuote ||
       !candidate.text.includes(supportingQuote)
     ) {
@@ -382,6 +496,9 @@ export function buildVerifiedQualificationSources(args: {
       sourceUrl: candidate.sourceUrl,
       evidenceUrl: candidate.evidenceUrl,
       authorId: candidate.authorId,
+      ...(candidate.employerName
+        ? { employerName: candidate.employerName }
+        : {}),
       text: candidate.text,
       publishedAt: candidate.publishedAt,
       discoveryQueries: candidate.discoveryQueries,

@@ -1,4 +1,8 @@
 import { notifyWorkspacePlanLimitReached } from "../lib/planLimitNotificationCore";
+import {
+  isAccountFirstDiscoveryEnabled,
+  isFreshAccountResearchHint,
+} from "../lib/accountFirstDiscoveryCore";
 import { getLearningTargetingFingerprint } from "../lib/learningTargetingHelpers";
 // convex/workflows/prospecting.ts
 // Continuous 24/7 prospecting workflow using Convex Workflow component
@@ -449,18 +453,30 @@ export const prospectingWorkflow = workflow.define({
           rawValue: item.query,
           sourceTheme: item.sourceKeyword,
         }));
+    const accountQueries = new Set(
+      socialQueriesResult.accountResearchQueries ?? []
+    );
     const noveltyScreening = await step.runAction(
       internal.memory.screenDiscoveryQueryCandidatesInternal,
       {
         workspaceId: args.workspaceId,
         expectedTargetingFingerprint:
           getLearningTargetingFingerprint(workspace),
-        candidates: candidateInputs,
+        // Different named employers are distinct retrieval targets, even for the same role.
+        // Keyword storage still canonical-deduplicates and preserves search history.
+        candidates: candidateInputs.filter(
+          (item) => !accountQueries.has(item.rawValue)
+        ),
       }
     );
-    const acceptedSocialQueries = noveltyScreening.accepted.map(
-      (candidate: { rawValue: string }) => candidate.rawValue
-    );
+    const acceptedSocialQueries = [
+      ...new Set([
+        ...socialQueries.filter((query) => accountQueries.has(query)),
+        ...noveltyScreening.accepted.map(
+          (candidate: { rawValue: string }) => candidate.rawValue
+        ),
+      ]),
+    ];
     const acceptedQuerySet = new Set(acceptedSocialQueries);
     const allowedDiscoveryStages = getAllowedDiscoveryStages({
       bootstrapCycleCount: workspace.prospectingBootstrapCycleCount,
@@ -1139,7 +1155,15 @@ export const saveKeywordsInternal = internalMutation({
       keywordsToSave.push({
         type: "social_query",
         value: query,
-        source: "agent",
+        source:
+          isAccountFirstDiscoveryEnabled(args.workspaceId) &&
+          metadata?.linkedinSurfaceTargets?.includes("people") &&
+          isFreshAccountResearchHint(
+            metadata.sourceKeyword,
+            getCurrentUTCTimestamp()
+          )
+            ? (metadata.sourceKeyword ?? "agent")
+            : "agent",
         platformTargets: metadata?.platformTargets,
         linkedinSurface: metadata?.linkedinSurface,
         linkedinSurfaceTargets: metadata?.linkedinSurfaceTargets,

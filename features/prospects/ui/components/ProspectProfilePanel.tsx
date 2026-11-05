@@ -45,6 +45,7 @@ import { getTwitterPostId } from "@/shared/lib/twitter/contracts";
 import type { TwitterUrlEntity } from "@/shared/lib/twitter/profileLinks";
 import { useActiveUseCaseLabels } from "@/shared/hooks";
 import { getProspectDisplayTimestamp } from "../../lib/getProspectDisplayTimestamp";
+import { isEmployerEventEvidence } from "../../lib/prospectEvidence";
 import {
   UI_PREVIEW_ACTIVITY,
   UI_PREVIEW_INTERACTIONS,
@@ -85,6 +86,12 @@ export interface ProspectProfileData {
   };
   qualificationSources?: Array<{
     sourceId?: string;
+    evidenceKind?: string;
+    sourceUrl?: string;
+    employerName?: string;
+    supportingQuote?: string;
+    publishedAt?: string;
+    verifiedAt?: number;
     sourcePost: unknown;
   }>;
   location?: string;
@@ -166,7 +173,7 @@ export function ProspectProfilePanel({
   // Handle pain point click - push evidence panel
   const handlePainClick = (painPoint: PainPoint) => {
     const evidencePosts = Array.isArray(painPoint.evidencePosts)
-      ? painPoint.evidencePosts
+      ? painPoint.evidencePosts.filter((post) => !isEmployerEventEvidence(post))
       : [];
     if (evidencePosts.length === 0) {
       return;
@@ -193,7 +200,9 @@ export function ProspectProfilePanel({
     }
 
     const evidencePosts = Array.isArray(prospect?.finance?.evidencePosts)
-      ? prospect.finance.evidencePosts
+      ? prospect.finance.evidencePosts.filter(
+          (post) => !isEmployerEventEvidence(post)
+        )
       : [];
     if (evidencePosts.length > 0) {
       const payload = {
@@ -217,7 +226,9 @@ export function ProspectProfilePanel({
     }
 
     const posts = (prospect.qualificationSources ?? []).flatMap((source) =>
-      source.sourcePost ? [source.sourcePost] : []
+      !isEmployerEventEvidence(source) && source.sourcePost
+        ? [source.sourcePost]
+        : []
     );
     if (posts.length === 0) {
       return;
@@ -328,13 +339,16 @@ export function ProspectProfilePanel({
   const relevantActivityPosts = React.useMemo(() => {
     if (!prospect) return [];
 
-    return dedupePostsById([
-      ...(prospect.evidencePosts || []),
-      ...(prospect.painPoints?.flatMap((pp) => pp.evidencePosts || []) || []),
-      ...(prospect.finance?.evidencePosts || []),
-      ...(prospect.qualificationSources?.map((source) => source.sourcePost) ||
-        []),
-    ]);
+    return dedupePostsById(
+      [
+        ...(prospect.evidencePosts || []),
+        ...(prospect.painPoints?.flatMap((pp) => pp.evidencePosts || []) || []),
+        ...(prospect.finance?.evidencePosts || []),
+        ...(prospect.qualificationSources
+          ?.filter((source) => !isEmployerEventEvidence(source))
+          .map((source) => source.sourcePost) || []),
+      ].filter((post) => !isEmployerEventEvidence(post))
+    );
   }, [prospect]);
 
   const panel = (
@@ -467,7 +481,9 @@ export function ProspectProfilePanel({
                         qualificationStatus={prospect.qualificationStatus}
                         qualificationScore={prospect.qualificationScore}
                         qualificationSourceCount={
-                          prospect.qualificationSources?.length
+                          prospect.qualificationSources?.filter(
+                            (source) => !isEmployerEventEvidence(source)
+                          ).length
                         }
                         status={prospect.status}
                         company={prospect.company}
@@ -492,6 +508,53 @@ export function ProspectProfilePanel({
                           handleQualificationSourcesClick
                         }
                       />
+                      {prospect.qualificationSources
+                        ?.filter((source) => isEmployerEventEvidence(source))
+                        .map((source) => (
+                          <div key={source.sourceId} className="mt-3 text-sm">
+                            <p className="text-muted-foreground">
+                              Company event
+                              {source.employerName
+                                ? ` · ${source.employerName}`
+                                : ""}
+                            </p>
+                            {source.sourceUrl && (
+                              <a
+                                href={source.sourceUrl}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                className="break-words underline"
+                              >
+                                Official company source
+                              </a>
+                            )}
+                            {source.publishedAt && (
+                              <p className="text-muted-foreground">
+                                Published{" "}
+                                {new Date(source.publishedAt)
+                                  .toISOString()
+                                  .slice(0, 10)}
+                              </p>
+                            )}
+                            {source.verifiedAt && (
+                              <p className="text-muted-foreground">
+                                Verified{" "}
+                                {new Date(source.verifiedAt)
+                                  .toISOString()
+                                  .slice(0, 10)}
+                              </p>
+                            )}
+                            {source.supportingQuote && (
+                              <blockquote className="mt-1 border-l-2 pl-3">
+                                {source.supportingQuote}
+                              </blockquote>
+                            )}
+                            <p className="text-muted-foreground mt-1 text-xs">
+                              Company context. Individual buying intent is
+                              unconfirmed.
+                            </p>
+                          </div>
+                        ))}
                     </section>
 
                     <Separator orientation="horizontal" className="my-0" />

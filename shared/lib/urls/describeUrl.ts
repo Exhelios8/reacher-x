@@ -1,4 +1,5 @@
 import Exa from "exa-js";
+import { isPublicHttpUrl } from "../utils/url/urlSafety";
 
 export type DescribeUrlResult =
   | {
@@ -6,6 +7,8 @@ export type DescribeUrlResult =
       content: string;
       title?: string;
       author?: string;
+      finalUrl?: string;
+      publishedDate?: string;
       source: "exa" | "html-fallback";
     }
   | {
@@ -23,29 +26,6 @@ function createExaClient(): Exa | null {
     return null;
   }
   return new Exa(apiKey);
-}
-
-function isPrivateHostname(hostname: string): boolean {
-  const normalized = hostname.toLowerCase();
-  if (
-    normalized === "localhost" ||
-    normalized === "127.0.0.1" ||
-    normalized === "0.0.0.0" ||
-    normalized === "::1" ||
-    normalized.endsWith(".localhost")
-  ) {
-    return true;
-  }
-
-  if (
-    normalized.startsWith("10.") ||
-    normalized.startsWith("192.168.") ||
-    /^172\.(1[6-9]|2\d|3[0-1])\./.test(normalized)
-  ) {
-    return true;
-  }
-
-  return false;
 }
 
 function decodeHtmlEntities(value: string): string {
@@ -126,6 +106,72 @@ function truncateContent(value: string): string {
     : value;
 }
 
+/** Accept only this page's publisher metadata, never crawl dates or related articles. */
+function publisherPublicationDate(
+  html: string,
+  pageUrl: string
+): string | undefined {
+  const head = html.match(/<head\b[^>]*>([\s\S]*?)<\/head>/i)?.[1] ?? "";
+  const canonical = head.match(
+    /<link\b(?=[^>]*\brel=["']canonical["'])(?=[^>]*\bhref=["']([^"']+)["'])[^>]*>/i
+  )?.[1];
+  const samePage = (value: unknown) => {
+    if (typeof value !== "string") return false;
+    try {
+      const candidate = new URL(value, pageUrl);
+      const page = new URL(pageUrl);
+      candidate.hash = page.hash = "";
+      return candidate.href.replace(/\/$/, "") === page.href.replace(/\/$/, "");
+    } catch {
+      return false;
+    }
+  };
+  if (canonical && !samePage(decodeHtmlEntities(canonical))) return undefined;
+  const explicit =
+    extractMetaContent(head, "article:published_time") ??
+    extractMetaContent(head, "parsely-pub-date");
+  if (explicit) return explicit;
+  const dates = new Set<string>();
+  const inspect = (value: unknown) => {
+    if (Array.isArray(value)) {
+      value.forEach(inspect);
+      return;
+    }
+    if (!value || typeof value !== "object") return;
+    const entry = value as Record<string, unknown>;
+    if (Array.isArray(entry["@graph"])) entry["@graph"].forEach(inspect);
+    const types = Array.isArray(entry["@type"])
+      ? entry["@type"]
+      : [entry["@type"]];
+    const main = entry.mainEntityOfPage;
+    const identity =
+      entry.url ??
+      (main && typeof main === "object"
+        ? (main as Record<string, unknown>)["@id"]
+        : main);
+    if (
+      types.some((type) =>
+        ["Article", "NewsArticle", "BlogPosting", "TechArticle"].includes(
+          String(type)
+        )
+      ) &&
+      samePage(identity) &&
+      typeof entry.datePublished === "string"
+    )
+      dates.add(entry.datePublished);
+  };
+  for (const script of html.matchAll(
+    /<script\b[^>]*type=["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/gi
+  )) {
+    try {
+      inspect(JSON.parse(script[1]));
+    } catch {
+      /* Invalid metadata is not publication proof. */
+    }
+  }
+  return dates.size === 1 ? [...dates][0] : undefined;
+}
+
 async function tryDescribeWithExa(
   url: string
 ): Promise<DescribeUrlResult | null> {
@@ -151,6 +197,8 @@ async function tryDescribeWithExa(
       content: truncateContent(text),
       title: page?.title?.trim() || undefined,
       author: page?.author?.trim() || undefined,
+      finalUrl: page?.url,
+      publishedDate: page?.publishedDate ?? undefined,
       source: "exa",
     };
   } catch {
@@ -159,7 +207,8 @@ async function tryDescribeWithExa(
 }
 
 async function tryDescribeWithHtmlFetch(
-  url: string
+  url: string,
+  rejectRedirects = false
 ): Promise<DescribeUrlResult> {
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
@@ -167,7 +216,7 @@ async function tryDescribeWithHtmlFetch(
   try {
     const response = await fetch(url, {
       method: "GET",
-      redirect: "follow",
+      redirect: rejectRedirects ? "error" : "follow",
       cache: "no-store",
       signal: controller.signal,
       headers: {
@@ -227,6 +276,8 @@ async function tryDescribeWithHtmlFetch(
       content: truncateContent(combined),
       title,
       author,
+      finalUrl: response.url,
+      publishedDate: publisherPublicationDate(raw, response.url || url),
       source: "html-fallback",
     };
   } catch (error) {
@@ -263,7 +314,7 @@ export function validateDescribeUrlInput(input: string):
     return { ok: false, error: "Only HTTP and HTTPS URLs are supported" };
   }
 
-  if (isPrivateHostname(parsed.hostname)) {
+  if (!isPublicHttpUrl(parsed.href) || parsed.username || parsed.password) {
     return {
       ok: false,
       error: "Local and private-network URLs are not supported",
@@ -289,12 +340,13 @@ export async function describeUrl(url: string): Promise<DescribeUrlResult> {
 
 /** Direct HTML reader used only after a tracked primary provider attempt. */
 export async function describeUrlWithHtmlFallback(
-  url: string
+  url: string,
+  options?: { rejectRedirects?: boolean }
 ): Promise<DescribeUrlResult> {
   const validation = validateDescribeUrlInput(url);
   if (!validation.ok) {
     return { success: false, error: validation.error };
   }
 
-  return tryDescribeWithHtmlFetch(validation.url);
+  return tryDescribeWithHtmlFetch(validation.url, options?.rejectRedirects);
 }

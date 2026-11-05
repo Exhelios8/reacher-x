@@ -22,7 +22,8 @@ export const WORKSPACE_MEMORY_COMPLIANCE_GENERATION_POLICY = {
   fallbackRouting: "onboarding",
   temperature: 0,
   maxRetries: 2,
-  maxOutputTokens: 1_000,
+  // Reasoning shares this budget with the visible compliance verdict.
+  maxOutputTokens: 8_192,
   nativeStructuredOutput: true,
 } as const;
 

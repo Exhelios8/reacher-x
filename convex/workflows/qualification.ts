@@ -142,6 +142,9 @@ export const indexQualificationEvidence = internalAction({
         text: v.string(),
         url: v.optional(v.string()),
         platform: prospectPlatformValidator,
+        evidenceKind: v.optional(v.literal("employer_event")),
+        employerName: v.optional(v.string()),
+        publishedAt: v.optional(v.string()),
       })
     ),
   },
@@ -641,6 +644,13 @@ export const qualificationWorkflow = workflow.define({
         text: source.text,
         url: source.evidenceUrl ?? source.sourceUrl,
         platform,
+        ...(source.evidenceKind === "employer_event"
+          ? {
+              evidenceKind: "employer_event" as const,
+              employerName: source.employerName,
+              publishedAt: source.publishedAt,
+            }
+          : {}),
       }));
 
       // Index evidence posts to RAG (fire and forget, don't block workflow)
