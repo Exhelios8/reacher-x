@@ -226,7 +226,13 @@ async function getPrioritizedSocialQueries(
       (keyword) =>
         !accountFirstLinkedIn ||
         (args.surface === "people"
-          ? isFreshAccountResearchHint(keyword.source, now)
+          ? isFreshAccountResearchHint(
+              keyword.source,
+              now,
+              workspace.targetingSpec?.discoveryMode === "peer_or_site_audit"
+                ? workspace.targetingSpec.searchHints.excludedCompanyDomains
+                : undefined
+            )
           : keyword.queryStyle !== "role_title" &&
             (!workPhrases.length ||
               workPhrases.some((phrase) =>

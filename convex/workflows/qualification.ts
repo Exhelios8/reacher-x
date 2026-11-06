@@ -36,6 +36,7 @@ import {
   shouldRecoverQualificationWorkflowStatusError,
   QUALIFICATION_MODEL_FAILURE_CODE,
   REQUIRED_PROBLEM_SOURCE_UNAVAILABLE,
+  ACCOUNT_SOURCE_UNAVAILABLE,
 } from "../lib/qualificationFailureCore";
 import { TENANT_JOB_PRIORITY } from "../lib/tenantSchedulerCore";
 import { enqueueTenantJobWithRetry } from "../lib/tenantSchedulerEnqueue";
@@ -566,9 +567,11 @@ export const qualificationWorkflow = workflow.define({
       title: result.qualified
         ? `Good match · ${result.score}% match`
         : `Not a match · ${result.score}% match`,
-      description: result.qualified
-        ? `Match score: ${result.score}. Minimum required: ${QUALIFICATION_THRESHOLD}.${isStillSetupPreview ? "" : " Finding profile details next."}`
-        : `Scored ${result.score}. Minimum required: ${QUALIFICATION_THRESHOLD}.`,
+      description: result.qualificationVerification.routeAssessment
+        ? (result.matchReasoning ?? result.reasoning)
+        : result.qualified
+          ? `Match score: ${result.score}. Minimum required: ${QUALIFICATION_THRESHOLD}.${isStillSetupPreview ? "" : " Finding profile details next."}`
+          : `Scored ${result.score}. Minimum required: ${QUALIFICATION_THRESHOLD}.`,
     });
     await step.runMutation(internal.memory.recordMemoryWorkflowEventInternal, {
       workspaceId: args.workspaceId,
@@ -881,9 +884,9 @@ export const handleQualificationComplete = internalMutation({
     const now = getCurrentUTCTimestamp();
     if (args.result.kind === "failed") {
       const modelFailure = parseQualificationModelFailure(args.result.error);
-      const problemSourceUnavailable = args.result.error.includes(
-        REQUIRED_PROBLEM_SOURCE_UNAVAILABLE
-      );
+      const problemSourceUnavailable =
+        args.result.error.includes(REQUIRED_PROBLEM_SOURCE_UNAVAILABLE) ||
+        args.result.error.includes(ACCOUNT_SOURCE_UNAVAILABLE);
       const previousWorkflowAttemptCount =
         prospect.qualificationLastFailure?.workflowAttemptCount ?? 0;
       const workflowAttemptCount = previousWorkflowAttemptCount + 1;

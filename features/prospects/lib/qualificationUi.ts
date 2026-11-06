@@ -61,3 +61,26 @@ export function resolveQualificationPresentation(
     profileValueClassName: "font-mono text-muted-foreground",
   };
 }
+
+export type QualificationRouteAssessment = {
+  route:
+    | "peer"
+    | "observed_problem"
+    | "testable_opportunity"
+    | "exploration"
+    | "none";
+  sourceUrl?: string;
+  sourceQuote?: string;
+  rationale: string;
+  offerOrRemedy?: string;
+  needStatus: "confirmed" | "hypothesis" | "unknown";
+  needsContactVerification?: boolean;
+};
+
+export const QUALIFICATION_ROUTE_LABELS = {
+  peer: "Comparable business",
+  observed_problem: "Observed site issue",
+  testable_opportunity: "Opportunity to test",
+  exploration: "Exploration",
+  none: "No supported approach",
+} as const;

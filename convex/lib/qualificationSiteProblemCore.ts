@@ -30,6 +30,14 @@ const REPLACEMENT_NOTICE =
   /(?:page|documentation|resource|content|url|address).{0,70}(?:has (?:been )?(?:moved|renamed|replaced)|moved permanently)|(?:page|documentation|ressource|contenu|adresse).{0,70}(?:d[eé]plac[eé]|renomm[eé]|remplac[eé])|(?:new url|new address|nouvelle adresse)/i;
 const ASSET_EXTENSION =
   /\.(?:pdf|zip|gz|tar|csv|txt|json|xml|png|jpe?g|gif|svg|webp|avif|ico|css|[cm]?js|map|woff2?|ttf|eot|mp[34]|webm)$/i;
+const HTML_ENTITIES: Record<string, string> = {
+  "&nbsp;": " ",
+  "&amp;": "&",
+  "&quot;": '"',
+  "&apos;": "'",
+  "&lt;": "<",
+  "&gt;": ">",
+};
 
 function safeOfficialUrl(
   value: string,
@@ -151,15 +159,13 @@ function hasExplicitAccessBarrier(response: Response, html: string): boolean {
 function selectLinkedPage(
   html: string,
   sourceUrl: string,
-  officialWebsite: string
+  officialWebsite: string,
+  includeResources = false,
+  excludedUrls: string[] = []
 ): { url: string; text: string } | undefined {
   // shortcut: pages using <base> or ambiguous attributes are skipped until a full DOM reader is needed.
   if (/<base\b/i.test(html)) return undefined;
-  const body =
-    html.match(/<main\b[^>]*>([\s\S]*?)<\/main>/i)?.[1] ??
-    html.match(/<article\b[^>]*>([\s\S]*?)<\/article>/i)?.[1] ??
-    html;
-  const content = body
+  const cleaned = html
     .replace(/<!--[\s\S]*?-->/g, " ")
     .replace(/<!--[\s\S]*$/g, " ")
     .replace(
@@ -170,10 +176,16 @@ function selectLinkedPage(
       /<(?:script|style|template|noscript|pre|code|textarea|xmp|title|footer|aside)\b[\s\S]*$/gi,
       " "
     );
-  for (const anchor of content.matchAll(
-    /<a\b((?:[^"'<>]|"[^"]*"|'[^']*')*)>([\s\S]*?)<\/a>/gi
+  // Consume every opening tag so apparent anchors inside quoted attributes are not links.
+  for (const anchor of cleaned.matchAll(
+    /<([a-z][a-z0-9:-]*)\b((?:[^"'<>]|"[^"]*"|'[^']*')*)>/gi
   )) {
-    const attributes = htmlAttributes(anchor[1]);
+    if (anchor[1].toLowerCase() !== "a") continue;
+    const anchorBody = cleaned
+      .slice(anchor.index! + anchor[0].length)
+      .match(/^([\s\S]*?)<\/a\s*>/i)?.[1];
+    if (anchorBody === undefined || /<a\b/i.test(anchorBody)) continue;
+    const attributes = htmlAttributes(anchor[2]);
     if (
       !attributes ||
       ["hidden", "disabled", "download", "onclick"].some((key) =>
@@ -193,10 +205,17 @@ function selectLinkedPage(
       !target ||
       !sameQualificationWebsiteHost(target, officialWebsite) ||
       target === sourceUrl ||
-      !COMMERCIAL_OR_DOC_ROUTE.test(new URL(target).pathname)
+      excludedUrls.includes(target) ||
+      !(
+        COMMERCIAL_OR_DOC_ROUTE.test(new URL(target).pathname) ||
+        (includeResources &&
+          /(?:\/(?:nos-solutions|notre-offre|nos-offres|prestations|expertises|features|platform|plateforme|resources|ressources|blog|learn)(?:\/|$)|solutions|services|offres|documentation|resources|ressources|blog)/i.test(
+            `${new URL(target).pathname} ${anchorBody.replace(/<[^>]+>/g, " ")}`
+          ))
+      )
     )
       continue;
-    const text = anchor[2]
+    const text = anchorBody
       .replace(/<svg\b[^>]*>[\s\S]*?<\/svg>/gi, " ")
       .replace(/<[^>]+>/g, " ")
       .replace(/&nbsp;/g, " ")
@@ -212,6 +231,192 @@ function selectLinkedPage(
     if (text) return { url: target, text: text.slice(0, 240) };
   }
   return undefined;
+}
+
+export type OfficialSiteReviewedPage = {
+  url: string;
+  finalUrl: string;
+  title: string;
+  observedAt: string;
+  text: string;
+  httpStatus: 200;
+  provenance: "native_http";
+};
+
+export type OfficialSiteReview = {
+  reviewedPages: OfficialSiteReviewedPage[];
+  siteProblems: ObservedSiteProblem[];
+  retryable: boolean;
+};
+
+function pageText(html: string): string {
+  const cleaned = html
+    .replace(/<!--[\s\S]*?-->/g, " ")
+    .replace(/<!--[\s\S]*$/g, " ")
+    .replace(
+      /<(script|style|template|noscript|pre|code|textarea|xmp|title|footer|aside|nav|svg)\b[^>]*>[\s\S]*?<\/\1>/gi,
+      " "
+    )
+    .replace(
+      /<(?:script|style|template|noscript|pre|code|textarea|xmp|title|footer|aside|nav|svg)\b[\s\S]*$/gi,
+      " "
+    );
+  return cleaned
+    .replace(/<(?:[^"'<>]|"[^"]*"|'[^']*')*>/g, " ")
+    .replace(
+      /&(?:nbsp|amp|quot|apos|lt|gt);/g,
+      (entity) => HTML_ENTITIES[entity] ?? entity
+    )
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 8000);
+}
+
+function documentTitle(html: string): string {
+  const cleaned = html
+    .replace(/<!--[\s\S]*?-->/g, " ")
+    .replace(/<!--[\s\S]*$/g, " ")
+    .replace(
+      /<(script|style|template|noscript|pre|code|textarea|xmp|svg)\b[^>]*>[\s\S]*?<\/\1>/gi,
+      " "
+    )
+    .replace(
+      /<(?:script|style|template|noscript|pre|code|textarea|xmp|svg)\b[\s\S]*$/gi,
+      " "
+    );
+  for (const tag of cleaned.matchAll(
+    /<([a-z][a-z0-9:-]*)\b((?:[^"'<>]|"[^"]*"|'[^']*')*)>/gi
+  )) {
+    if (tag[1].toLowerCase() !== "title") continue;
+    const value = cleaned
+      .slice(tag.index! + tag[0].length)
+      .match(/^([^<>]*)<\/title\s*>/i)?.[1];
+    return value === undefined ? "" : pageText(value).slice(0, 300);
+  }
+  return "";
+}
+
+/** A bounded first-party reading, including healthy pages. It asserts no defect or commercial impact. */
+export async function reviewOfficialSitePages(args: {
+  companyId: string;
+  officialWebsite: string;
+}): Promise<OfficialSiteReview> {
+  const result: OfficialSiteReview = {
+    reviewedPages: [],
+    siteProblems: [],
+    retryable: false,
+  };
+  const sourceUrl = safeOfficialUrl(args.officialWebsite, args.officialWebsite);
+  if (!sourceUrl || !/^[1-9]\d*$/.test(args.companyId)) return result;
+  const signal = AbortSignal.timeout(8_000);
+  let calls = 0;
+  const get = async (url: string) => {
+    if (calls >= 3) return undefined;
+    calls++;
+    const response = await fetch(url, {
+      method: "GET",
+      redirect: "manual",
+      credentials: "omit",
+      cache: "no-store",
+      signal,
+      headers: {
+        Accept: "text/html,application/xhtml+xml",
+        "User-Agent": "ReacherX/1.0",
+      },
+    });
+    const html = await readBoundedBody(response, 128 * 1024);
+    if (html === undefined || hasExplicitAccessBarrier(response, html))
+      return undefined;
+    if (response.status === 429 || response.status >= 500) {
+      result.retryable = true;
+      return undefined;
+    }
+    if (
+      response.url !== url ||
+      !safeOfficialUrl(response.url, args.officialWebsite) ||
+      hasAccessOrRedirectSignal(response, html)
+    )
+      return undefined;
+    return { response, html };
+  };
+  const retain = (page: { response: Response; html: string }): boolean => {
+    if (
+      page.response.status !== 200 ||
+      !/text\/html|application\/xhtml\+xml/i.test(
+        page.response.headers.get("content-type") ?? ""
+      )
+    )
+      return false;
+    const title = documentTitle(page.html);
+    const text = pageText(page.html);
+    if (
+      text.length < 40 ||
+      /^(?:404\b|page not found\b|not found\b|page introuvable\b|page non trouv[eé]e\b|erreur\s*404\b)/i.test(
+        `${title} ${text}`.trim()
+      )
+    )
+      return false;
+    result.reviewedPages.push({
+      url: page.response.url,
+      finalUrl: page.response.url,
+      title,
+      text,
+      httpStatus: 200,
+      observedAt: new Date().toISOString(),
+      provenance: "native_http",
+    });
+    return true;
+  };
+  try {
+    const source = await get(sourceUrl);
+    if (!source || !retain(source)) return result;
+    const visited = [sourceUrl];
+    while (calls < 3) {
+      const link = selectLinkedPage(
+        source.html,
+        sourceUrl,
+        args.officialWebsite,
+        true,
+        visited
+      );
+      if (!link) break;
+      visited.push(link.url);
+      const target = await get(link.url);
+      if (!target) continue;
+      if (retain(target)) continue;
+      const status = target.response.status;
+      if (
+        (status !== 404 && status !== 410) ||
+        calls >= 3 ||
+        !COMMERCIAL_OR_DOC_ROUTE.test(new URL(link.url).pathname)
+      )
+        continue;
+      const confirmation = await get(link.url);
+      if (!confirmation || confirmation.response.status !== status) continue;
+      const observedAt = new Date().toISOString();
+      const text = `Official page: ${sourceUrl}\nLinked commercial or documentation URL: ${link.url}\nLink label: ${link.text}\nObserved HTTP ${status}, confirmed by two GET requests.\nObserved at: ${observedAt}`;
+      result.siteProblems.push({
+        evidenceKind: "observed_site_problem",
+        companyId: args.companyId,
+        url: sourceUrl,
+        finalUrl: sourceUrl,
+        targetUrl: link.url,
+        anchorText: link.text,
+        httpStatus: status,
+        observedAt,
+        text,
+      });
+    }
+  } catch (error) {
+    if (
+      error instanceof Error &&
+      (error instanceof TypeError ||
+        error.name === "AbortError" ||
+        error.name === "TimeoutError")
+    )
+      result.retryable = true;
+  }
+  return result;
 }
 
 /** One public source plus two identical missing-page GETs; every uncertainty leaves no finding. */

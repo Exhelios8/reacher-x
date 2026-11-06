@@ -126,3 +126,130 @@ test("named queries need an observed source, matching employer text and issuer d
     )
   ).toBeNull();
 });
+
+test("peer-or-site-audit rotates one evergreen offer and one independent site exploration", () => {
+  const spec = buildLegacyWorkspaceTargetingSpec({
+    description: "French businesses",
+    profiles: [],
+  });
+  spec.discoveryMode = "peer_or_site_audit";
+  spec.searchHints.peerOfferPhrases = [
+    "plateforme agents IA entreprise",
+    "API voix temps réel",
+  ];
+  spec.searchHints.activityPhrases = [
+    "catalogue distributeur professionnel",
+    "réseau agences services locales",
+  ];
+  spec.searchHints.languageCodes = ["fr"];
+  spec.searchHints.locations = ["France"];
+  const args = { targetingSpec: spec, keywords: ["site"], now };
+  const queries = buildAccountResearchQueries(args);
+  expect(queries).toHaveLength(2);
+  expect(
+    spec.searchHints.peerOfferPhrases.some((phrase) =>
+      queries[0].startsWith(phrase)
+    )
+  ).toBe(true);
+  expect(
+    spec.searchHints.activityPhrases.some((phrase) =>
+      queries[1].startsWith(phrase)
+    )
+  ).toBe(true);
+  expect(queries.every((query) => query.endsWith("France site officiel"))).toBe(
+    true
+  );
+  expect(queries.join(" ")).not.toMatch(/actualit|news|fundrais|hiring/);
+  const next = buildAccountResearchQueries({
+    ...args,
+    now: now + 5 * 60 * 1000,
+  });
+  expect(new Set([...queries, ...next]).size).toBe(4);
+});
+
+test("an undated own offer is a short-lived retrieval hint, never a published event", () => {
+  const spec = buildLegacyWorkspaceTargetingSpec({
+    description: "French businesses",
+    profiles: [],
+  });
+  spec.discoveryMode = "peer_or_site_audit";
+  spec.searchHints.excludedCompanyDomains = ["client.fr"];
+  const offer = {
+    title: "Acme logiciels de gestion",
+    url: "https://acme.fr/produits",
+    snippet: "Acme vend un logiciel de gestion pour les PME.",
+  };
+  const findings = selectRecentAccountFindings(
+    [
+      offer,
+      { ...offer, url: "https://portal.client.fr/offre" },
+      { ...offer, url: "https://client.fr/offre" },
+      { ...offer, url: "https://supplier.fr/case-studies/acme" },
+      { ...offer, url: "https://linkedin.com/company/acme" },
+    ],
+    now,
+    spec
+  );
+  expect(findings).toEqual([
+    { ...offer, retrievedAt: new Date(now).toISOString() },
+  ]);
+  expect(findings[0].publishedDate).toBeUndefined();
+  const grounded = groundAccountQuery(
+    {
+      query: "Acme directeur marketing",
+      accountName: "Acme",
+      accountSourceUrl: offer.url,
+    },
+    findings,
+    spec
+  );
+  expect(grounded?.sourceKeyword).toBe(
+    `account_retrieval_hint:${now}|${offer.url}`
+  );
+  expect(isFreshAccountResearchHint(grounded?.sourceKeyword, now)).toBe(true);
+  expect(
+    isFreshAccountResearchHint(grounded?.sourceKeyword, now + 86_400_001)
+  ).toBe(false);
+  expect(
+    isAccountResearchHintFromFindings(grounded?.sourceKeyword, findings, now)
+  ).toBe(true);
+  expect(
+    isAccountResearchHintFromFindings(grounded?.sourceKeyword, [offer], now)
+  ).toBe(false);
+  expect(
+    groundAccountQuery(
+      {
+        query: "Acme directeur marketing",
+        accountName: "Acme",
+        accountSourceUrl: offer.url,
+      },
+      findings
+    )
+  ).toBeNull();
+});
+
+test("V3 never falls back to reference names, entities or generated keywords as seed accounts", () => {
+  const spec = buildLegacyWorkspaceTargetingSpec({
+    description: "French businesses",
+    profiles: [],
+  });
+  spec.discoveryMode = "peer_or_site_audit";
+  spec.searchHints.activityPhrases = [];
+  spec.searchHints.entities = ["Reference account"];
+  spec.searchHints.companyNames = ["Reference account"];
+  expect(
+    buildAccountResearchQueries({
+      targetingSpec: spec,
+      keywords: ["Reference account"],
+      now,
+    })
+  ).toEqual([]);
+  spec.searchHints.peerOfferPhrases = ["logiciel de gestion professionnelle"];
+  expect(
+    buildAccountResearchQueries({
+      targetingSpec: spec,
+      keywords: ["Reference account"],
+      now,
+    })
+  ).toEqual(["logiciel de gestion professionnelle official website"]);
+});

@@ -27,6 +27,15 @@ export function getLearningTargetingFingerprint(
         painPoints,
       })),
       targetingSpec: workspace.targetingSpec && {
+        ...(workspace.targetingSpec.discoveryMode
+          ? {
+              discoveryMode: workspace.targetingSpec.discoveryMode,
+              peerOfferPhrases:
+                workspace.targetingSpec.searchHints.peerOfferPhrases,
+              excludedCompanyDomains:
+                workspace.targetingSpec.searchHints.excludedCompanyDomains,
+            }
+          : {}),
         version: workspace.targetingSpec.version,
         summary: workspace.targetingSpec.summary,
         criteria: workspace.targetingSpec.criteria,

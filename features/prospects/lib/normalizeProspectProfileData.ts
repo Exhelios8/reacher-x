@@ -1,3 +1,4 @@
+import type { QualificationRouteAssessment } from "./qualificationUi";
 import { getStringProperty } from "@/convex/lib/typeGuards";
 import type { ProspectProfileData } from "../ui/components/ProspectProfilePanel";
 import type { PipelineStage } from "../ui/components/PipelineTimeline";
@@ -212,6 +213,24 @@ export function normalizeProspectProfileData(
       undefined;
   }
 
+  const verification = prospect.qualificationVerification as
+    | { routeAssessment?: QualificationRouteAssessment }
+    | undefined;
+  const rawRoute = verification?.routeAssessment;
+  const routeAssessment =
+    rawRoute &&
+    [
+      "peer",
+      "observed_problem",
+      "testable_opportunity",
+      "exploration",
+      "none",
+    ].includes(rawRoute.route) &&
+    ["confirmed", "hypothesis", "unknown"].includes(rawRoute.needStatus) &&
+    typeof rawRoute.rationale === "string"
+      ? { ...rawRoute, sourceUrl: getPublicEvidenceUrl(rawRoute.sourceUrl) }
+      : undefined;
+
   const creationTime =
     typeof prospect._creationTime === "number"
       ? (prospect._creationTime as number)
@@ -247,6 +266,7 @@ export function normalizeProspectProfileData(
           ...existingStageTimestamps,
         }
       : existingStageTimestamps,
+    routeAssessment,
     qualificationScore: prospect.qualificationScore as number | undefined,
     qualificationStatus: prospect.qualificationStatus as
       | "pending"

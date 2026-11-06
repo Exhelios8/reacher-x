@@ -3,7 +3,7 @@ import { formatSyntheticTargetingExamples } from "../../lib/syntheticProfileCore
 
 // convex/agents/tools/qualifyProspect.ts
 // Agent tool for prospect qualification
-// Thin wrapper - delegates to qualificationCore.ts
+// Thin wrapper - delegates evidence acquisition and qualification to shared evaluators.
 
 import { getLearningTargetingFingerprint } from "../../lib/learningTargetingHelpers";
 import { createTool } from "@convex-dev/agent";
@@ -13,8 +13,13 @@ import {
   qualifyProspectCore,
   MAX_KEYWORDS_TO_SEARCH,
   MAX_EVIDENCE_POSTS,
+  type QualificationCoreParams,
   type QualificationResult,
 } from "../../lib/qualificationCore";
+import { evaluateQualificationWithExternalArticles } from "../../lib/qualificationEvaluationCore";
+import { isAccountFirstDiscoveryEnabled } from "../../lib/accountFirstDiscoveryCore";
+import { resolveLinkedInProspectProfileIdentifiers } from "../../integrations/linkedin/profileIdentity";
+import { isRecord } from "../../lib/typeGuards";
 import type { Id } from "../../_generated/dataModel";
 import { runLoggedAgentTool } from "./logging";
 import { sanitizeProspectEvidencePostsForWorkflow } from "../../lib/workflowSafeProspect";
@@ -41,11 +46,11 @@ export interface QualifyProspectResult {
 
 /**
  * Agent tool for qualifying a prospect.
- * Thin wrapper that fetches data and calls qualifyProspectCore.
+ * Uses the verified acquisition path for opted-in peer/site-audit workspaces.
  */
 export const qualifyProspect = createTool({
   description:
-    "Qualify a prospect by gathering evidence from their posts and scoring their fit. Use this after a prospect has been found to determine if they should be shown to the user.",
+    "Qualify a prospect using their profile and available verified evidence to check their fit. Use this after a prospect has been found to determine if they should be shown to the user.",
   inputSchema: z.object({
     prospectId: z.string().describe("The ID of the prospect to qualify"),
     workspaceId: z
@@ -160,7 +165,48 @@ export const qualifyProspect = createTool({
             };
           }
 
-          if (!workspace.icps || workspace.icps.length === 0) {
+          const peerOrSite =
+            workspace.targetingSpec?.discoveryMode === "peer_or_site_audit";
+          if (peerOrSite) {
+            const identity =
+              resolveLinkedInProspectProfileIdentifiers(prospect);
+            const data = isRecord(prospect.data) ? prospect.data : {};
+            const author = isRecord(data.author) ? data.author : {};
+            const companyProfile = [
+              prospect.socialProfiles?.linkedin?.url,
+              data.url,
+              data.linkedinUrl,
+              author.url,
+              author.profileUrl,
+            ].some(
+              (url) =>
+                typeof url === "string" &&
+                /^https?:\/\/(?:www\.)?linkedin\.com\/company\//i.test(url)
+            );
+            if (
+              !isAccountFirstDiscoveryEnabled(String(workspace._id)) ||
+              prospect.platform !== "linkedin" ||
+              prospect.prospectType === "organization" ||
+              !["search_people", "search_post"].includes(
+                prospect.discoverySource ?? ""
+              ) ||
+              companyProfile ||
+              !(identity.username || identity.profileUrn)
+            ) {
+              return {
+                success: false,
+                prospectId: args.prospectId,
+                qualified: false,
+                score: 0,
+                status: "pending",
+                evidenceCount: 0,
+                matchedKeywords: [],
+                error: "More evidence is needed to check this profile’s match.",
+              };
+            }
+          }
+
+          if (!peerOrSite && (!workspace.icps || workspace.icps.length === 0)) {
             logEvent.warn(
               "Workspace has no ICPs configured for qualification",
               {
@@ -183,13 +229,13 @@ export const qualifyProspect = createTool({
 
           // Collect all qualificationKeywords from ICPs
           const allQualificationKeywords: string[] = [];
-          for (const icp of workspace.icps) {
+          for (const icp of workspace.icps ?? []) {
             if (icp.qualificationKeywords) {
               allQualificationKeywords.push(...icp.qualificationKeywords);
             }
           }
 
-          if (allQualificationKeywords.length === 0) {
+          if (!peerOrSite && allQualificationKeywords.length === 0) {
             logEvent.warn("No qualification keywords configured in ICPs", {
               workspace: {
                 id: args.workspaceId,
@@ -213,12 +259,23 @@ export const qualifyProspect = createTool({
           );
 
           // 3. Fetch evidence posts based on platform
-          let evidencePosts: Array<Record<string, unknown>> = [];
-          let matchedKeywords: string[] = [];
+          let evidencePosts: Array<Record<string, unknown>> = peerOrSite
+            ? sanitizeProspectEvidencePostsForWorkflow(
+                prospect.evidencePosts ?? [],
+                prospect.platform
+              )
+            : [];
+          let matchedKeywords: string[] = peerOrSite
+            ? (prospect.qualificationVerification?.discoveryQueries ?? [])
+            : [];
 
-          const prospectData = prospect.data as Record<string, unknown>;
+          const prospectData = peerOrSite
+            ? isRecord(prospect.data)
+              ? prospect.data
+              : {}
+            : (prospect.data as Record<string, unknown>);
 
-          if (prospect.platform === "twitter") {
+          if (!peerOrSite && prospect.platform === "twitter") {
             // Type-safe screen_name extraction
             const user = prospectData.user as
               | Record<string, unknown>
@@ -273,7 +330,7 @@ export const qualifyProspect = createTool({
                 });
               }
             }
-          } else if (prospect.platform === "linkedin") {
+          } else if (!peerOrSite && prospect.platform === "linkedin") {
             const socialProfiles =
               prospect.socialProfiles &&
               typeof prospect.socialProfiles === "object"
@@ -353,7 +410,7 @@ export const qualifyProspect = createTool({
             }
           );
 
-          const result: QualificationResult = await qualifyProspectCore({
+          const qualificationArgs: QualificationCoreParams = {
             platform: prospect.platform,
             evidencePosts: sanitizeProspectEvidencePostsForWorkflow(
               evidencePosts,
@@ -380,7 +437,32 @@ export const qualifyProspect = createTool({
             similarQualifiedCases: learningContext.similarQualifiedCases,
             similarDisqualifiedCases: learningContext.similarDisqualifiedCases,
             routing: "onboarding",
-          });
+          };
+          const result: QualificationResult = peerOrSite
+            ? await evaluateQualificationWithExternalArticles(ctx, {
+                ...qualificationArgs,
+                workspaceId: workspace._id,
+                prospectId: prospect._id,
+              })
+            : await qualifyProspectCore(qualificationArgs);
+
+          if (
+            peerOrSite &&
+            (!result.qualificationVerification.routeAssessment ||
+              result.qualificationVerification.routeAssessment
+                .needsContactVerification)
+          ) {
+            return {
+              success: false,
+              prospectId: args.prospectId,
+              qualified: false,
+              score: 0,
+              status: "pending",
+              evidenceCount: 0,
+              matchedKeywords: [],
+              error: "More evidence is needed to check this profile’s match.",
+            };
+          }
 
           // 5. Update prospect in database
           const update = await ctx.runMutation(
@@ -388,6 +470,12 @@ export const qualifyProspect = createTool({
             {
               expectedTargetingFingerprint:
                 getLearningTargetingFingerprint(workspace),
+              ...(peerOrSite
+                ? {
+                    expectedQualificationStatus: prospect.qualificationStatus,
+                    expectedQualificationScore: prospect.qualificationScore,
+                  }
+                : {}),
               prospectId: args.prospectId as Id<"prospects">,
               qualificationStatus: result.status,
               qualificationReasoning: result.matchReasoning ?? result.reasoning,
@@ -396,7 +484,10 @@ export const qualifyProspect = createTool({
               qualificationCriteriaVersion: 1,
               qualificationCriterionResults: result.criterionResults,
               qualifiedAt: result.qualifiedAt,
-              evidencePosts: evidencePosts.slice(0, MAX_EVIDENCE_POSTS),
+              // The shared collector owns any refreshed post cache in V3.
+              ...(!peerOrSite
+                ? { evidencePosts: evidencePosts.slice(0, MAX_EVIDENCE_POSTS) }
+                : {}),
               qualificationKeywords: result.matchedKeywords,
               qualificationSources: result.qualificationSources,
               qualificationVerification: result.qualificationVerification,

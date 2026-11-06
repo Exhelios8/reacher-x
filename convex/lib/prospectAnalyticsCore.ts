@@ -3,6 +3,7 @@ import type { Doc } from "../_generated/dataModel";
 type ProspectAnalyticsState = Pick<
   Doc<"prospects">,
   | "platform"
+  | "qualificationVerification"
   | "qualificationStatus"
   | "qualifiedAt"
   | "disqualifiedAt"
@@ -17,6 +18,7 @@ type ProspectAnalyticsState = Pick<
 type ProspectAnalyticsPatch = Partial<
   Pick<
     Doc<"prospects">,
+    | "qualificationVerification"
     | "qualificationStatus"
     | "qualifiedAt"
     | "disqualifiedAt"
@@ -35,6 +37,7 @@ export type ProspectQualificationActivitySnapshot = {
 };
 
 const READY_INPUT_FIELDS = [
+  "qualificationVerification",
   "qualificationStatus",
   "qualifiedAt",
   "disqualifiedAt",
@@ -128,6 +131,7 @@ function inferReadyTransitionTimestamp(args: {
   }
 
   if (
+    hasOwnProperty(args.patch, "qualificationVerification") ||
     hasOwnProperty(args.patch, "qualificationStatus") ||
     hasOwnProperty(args.patch, "enrichmentStatus") ||
     hasOwnProperty(args.patch, "evidencePosts") ||
@@ -171,6 +175,7 @@ export function isProspectActionableReady(
   prospect: Pick<
     Doc<"prospects">,
     | "platform"
+    | "qualificationVerification"
     | "qualificationStatus"
     | "enrichmentStatus"
     | "evidencePosts"
@@ -182,11 +187,23 @@ export function isProspectActionableReady(
     return false;
   }
 
-  if (prospect.platform !== "linkedin") {
-    return true;
+  const route = prospect.qualificationVerification?.routeAssessment;
+  if (route) {
+    return (
+      prospect.platform === "linkedin" &&
+      !route.needsContactVerification &&
+      (route.route === "peer" ||
+        route.route === "observed_problem" ||
+        route.route === "testable_opportunity" ||
+        (route.route === "exploration" &&
+          Boolean(route.rationale.trim() && route.offerOrRemedy?.trim()))) &&
+      Boolean(route.sourceUrl?.trim() && route.sourceQuote?.trim())
+    );
   }
 
-  return countProspectEvidencePosts(prospect) > 0;
+  return (
+    prospect.platform !== "linkedin" || countProspectEvidencePosts(prospect) > 0
+  );
 }
 
 export function inferProspectReadyAtFromState(

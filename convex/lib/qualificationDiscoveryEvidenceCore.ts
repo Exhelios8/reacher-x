@@ -23,6 +23,7 @@ import { isAccountFirstDiscoveryEnabled } from "./accountFirstDiscoveryCore";
 import {
   observeOfficialSiteProblem,
   QualificationSiteProblemRetryableError,
+  reviewOfficialSitePages,
 } from "./qualificationSiteProblemCore";
 import {
   sanitizeLinkedInProfileForWorkflow,
@@ -124,13 +125,21 @@ export async function collectQualificationDiscoveryEvidence(
   const employerEventsEnabled =
     isAccountFirstDiscoveryEnabled(prospect.workspaceId) &&
     eventCriteria.length > 0;
+  const directSiteAuditEnabled =
+    isAccountFirstDiscoveryEnabled(prospect.workspaceId) &&
+    workspace.targetingSpec?.discoveryMode === "peer_or_site_audit";
+  const employerEvidenceEnabled =
+    employerEventsEnabled || directSiteAuditEnabled;
   const observeSiteProblems =
-    employerEventsEnabled && eventCriteria.some(isRequiredProblemCriterion);
-  const contextVersion = observeSiteProblems
-    ? 4
-    : employerEventsEnabled
-      ? 3
-      : 2;
+    directSiteAuditEnabled ||
+    (employerEventsEnabled && eventCriteria.some(isRequiredProblemCriterion));
+  const contextVersion = directSiteAuditEnabled
+    ? 5
+    : observeSiteProblems
+      ? 4
+      : employerEventsEnabled
+        ? 3
+        : 2;
   const cachedData = prospect.qualificationProfileData;
   const cachedEmployer =
     isRecord(cachedData) && isRecord(cachedData.employerEvidence)
@@ -138,7 +147,7 @@ export async function collectQualificationDiscoveryEvidence(
       : undefined;
   const identifiers = resolveLinkedInProspectProfileIdentifiers(prospect);
   const cacheIdentityMatches =
-    !employerEventsEnabled ||
+    !employerEvidenceEnabled ||
     (isRecord(cachedData) &&
       (identifiers.profileUrn
         ? normalizeLinkedInProfileQueryUrn(String(cachedData.urn)) ===
@@ -147,7 +156,7 @@ export async function collectQualificationDiscoveryEvidence(
           cachedData.username.toLowerCase() ===
             identifiers.username?.toLowerCase()));
   const cacheAgeValid =
-    !employerEventsEnabled ||
+    !employerEvidenceEnabled ||
     (typeof prospect.qualificationEvidenceFetchedAt === "number" &&
       prospect.qualificationEvidenceFetchedAt <= getCurrentUTCTimestamp() &&
       getCurrentUTCTimestamp() - prospect.qualificationEvidenceFetchedAt <
@@ -165,7 +174,7 @@ export async function collectQualificationDiscoveryEvidence(
     prospect.qualificationEvidenceFetchedAt &&
     prospect.qualificationProfileData.qualificationContextVersion ===
       contextVersion &&
-    (!employerEventsEnabled ||
+    (!employerEvidenceEnabled ||
       prospect.qualificationProfileData.qualificationTargetingFingerprint ===
         targetingFingerprint) &&
     !eventRetryDue &&
@@ -176,7 +185,7 @@ export async function collectQualificationDiscoveryEvidence(
     return {
       profileData: prospect.qualificationProfileData,
       evidencePosts: (prospect.evidencePosts ?? []).filter(isRecord),
-      ...(employerEventsEnabled && cachedEmployer
+      ...(employerEvidenceEnabled && cachedEmployer
         ? { employerEvidence: cachedEmployer }
         : {}),
     };
@@ -224,7 +233,7 @@ export async function collectQualificationDiscoveryEvidence(
     ...sanitizeLinkedInProfileForWorkflow(profile),
     // Older caches have no separately attributed employer event sources.
     qualificationContextVersion: contextVersion,
-    ...(employerEventsEnabled
+    ...(employerEvidenceEnabled
       ? { qualificationTargetingFingerprint: targetingFingerprint }
       : {}),
     // Retain actual responsibilities; the generic workflow sanitizer keeps only company names.
@@ -276,6 +285,7 @@ export async function collectQualificationDiscoveryEvidence(
         : undefined;
     const cachedWebsite = cachedEmployer?.officialWebsiteEvidence;
     let officialWebsiteEvidence =
+      !directSiteAuditEnabled &&
       companyId(cachedEmployer?.companyId) === employerId &&
       isRecord(cachedWebsite) &&
       typeof cachedWebsite.text === "string" &&
@@ -285,7 +295,11 @@ export async function collectQualificationDiscoveryEvidence(
         ? cachedWebsite
         : undefined;
     let websiteReadError: string | undefined;
-    if (!officialWebsiteEvidence && company.website?.trim()) {
+    if (
+      !directSiteAuditEnabled &&
+      !officialWebsiteEvidence &&
+      company.website?.trim()
+    ) {
       const [page] = await readWebPages([company.website], {
         ctx,
         consumer: "qualification.employer_website",
@@ -322,9 +336,29 @@ export async function collectQualificationDiscoveryEvidence(
         };
       }
     }
+    // Native audit is independent of optional Exa/news availability and runs before those calls.
+    let siteReview:
+      | Awaited<ReturnType<typeof reviewOfficialSitePages>>
+      | undefined;
+    if (directSiteAuditEnabled && typeof company.website === "string") {
+      try {
+        siteReview = await reviewOfficialSitePages({
+          companyId: employerId,
+          officialWebsite: company.website,
+        });
+      } catch {
+        // This optional observation must never erase the independently verified employer.
+        siteReview = { reviewedPages: [], siteProblems: [], retryable: true };
+      }
+    }
+    if (siteReview?.reviewedPages[0]) {
+      const page = siteReview.reviewedPages[0];
+      officialWebsiteEvidence = { ...page, retrievedAt: page.observedAt };
+    }
     const events: Record<string, unknown>[] = [];
     let eventSearchError: string | undefined;
     if (
+      !directSiteAuditEnabled &&
       employerEventsEnabled &&
       eventCriteria.length &&
       sameWebsiteHost(company.website, company.website)
@@ -399,8 +433,12 @@ export async function collectQualificationDiscoveryEvidence(
       }
     }
     let observation;
-    let siteProblemFetchRetryable = false;
-    if (observeSiteProblems && typeof company.website === "string") {
+    let siteProblemFetchRetryable = siteReview?.retryable ?? false;
+    if (
+      !directSiteAuditEnabled &&
+      observeSiteProblems &&
+      typeof company.website === "string"
+    ) {
       try {
         observation = await observeOfficialSiteProblem({
           companyId: employerId,
@@ -423,11 +461,19 @@ export async function collectQualificationDiscoveryEvidence(
       fetchedAt: new Date(getCurrentUTCTimestamp()).toISOString(),
       relationshipSourceUrl: profileUrl,
       officialWebsiteEvidence,
+      ...(siteReview
+        ? {
+            reviewedPages: siteReview.reviewedPages,
+            reviewedPage:
+              siteReview.reviewedPages[1] ?? siteReview.reviewedPages[0],
+          }
+        : {}),
       websiteReadError,
       events,
       ...(observeSiteProblems
         ? {
-            siteProblems: observation ? [observation] : [],
+            siteProblems:
+              siteReview?.siteProblems ?? (observation ? [observation] : []),
             ...(siteProblemFetchRetryable
               ? {
                   siteProblemFetchRetryable: true,
@@ -492,7 +538,7 @@ export async function collectQualificationDiscoveryEvidence(
   return {
     profileData,
     evidencePosts,
-    ...(employerEventsEnabled && isRecord(profileData.employerEvidence)
+    ...(employerEvidenceEnabled && isRecord(profileData.employerEvidence)
       ? { employerEvidence: profileData.employerEvidence }
       : {}),
   };

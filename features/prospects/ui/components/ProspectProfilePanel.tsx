@@ -6,6 +6,11 @@
  */
 "use client";
 
+import {
+  QUALIFICATION_ROUTE_LABELS,
+  type QualificationRouteAssessment,
+} from "../../lib/qualificationUi";
+
 import * as React from "react";
 import { cn, parseText } from "@/shared/lib/utils";
 import {
@@ -63,6 +68,7 @@ export interface ProspectProfileData {
   prospectType?: "individual" | "organization" | "unknown";
   briefIntro?: string;
   qualificationReasoning?: string;
+  routeAssessment?: QualificationRouteAssessment;
   pipelineStage?: PipelineStage;
   stageTimestamps?: Partial<Record<PipelineStage, number>>;
   qualificationStatus?: "pending" | "qualified" | "disqualified";
@@ -481,6 +487,49 @@ export function ProspectProfilePanel({
 
                     {/* Details */}
                     <section className="px-4 py-4">
+                      {prospect.routeAssessment ? (
+                        <div className="mb-4 space-y-2 rounded-md border p-3 text-sm">
+                          <p className="font-medium">
+                            {prospect.routeAssessment.needsContactVerification
+                              ? "Contact/employer to verify"
+                              : QUALIFICATION_ROUTE_LABELS[
+                                  prospect.routeAssessment.route
+                                ]}
+                          </p>
+                          <p>
+                            Need:{" "}
+                            {prospect.routeAssessment.needStatus === "confirmed"
+                              ? "confirmed by evidence"
+                              : prospect.routeAssessment.needStatus ===
+                                  "hypothesis"
+                                ? "hypothesis to validate"
+                                : "unknown"}
+                            . Purchase intent is not established by this route.
+                          </p>
+                          <p>{prospect.routeAssessment.rationale}</p>
+                          {prospect.routeAssessment.offerOrRemedy ? (
+                            <p>
+                              Proposed test:{" "}
+                              {prospect.routeAssessment.offerOrRemedy}
+                            </p>
+                          ) : null}
+                          {prospect.routeAssessment.sourceUrl ? (
+                            <a
+                              className="underline"
+                              href={prospect.routeAssessment.sourceUrl}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                            >
+                              Official source
+                            </a>
+                          ) : null}
+                          {prospect.routeAssessment.sourceQuote ? (
+                            <blockquote className="text-muted-foreground border-l-2 pl-3">
+                              {prospect.routeAssessment.sourceQuote}
+                            </blockquote>
+                          ) : null}
+                        </div>
+                      ) : null}
                       <ProspectDetailsCard
                         qualificationReasoning={prospect.qualificationReasoning}
                         qualificationStatus={prospect.qualificationStatus}

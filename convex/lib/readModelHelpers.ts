@@ -40,6 +40,7 @@ type ProspectSource = Pick<
   | "qualifiedAt"
   | "disqualifiedAt"
   | "qualificationScore"
+  | "qualificationVerification"
   | "qualificationReasoning"
   | "qualificationCriterionResults"
   | "enrichedAt"

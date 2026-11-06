@@ -5,6 +5,12 @@
 
 import { z } from "zod";
 import {
+  noPeerRoute,
+  peerRouteSchema,
+  verifyPeerRoute,
+  type PeerRouteProposal,
+} from "./peerQualificationCore";
+import {
   getRoutingTelemetry,
   robustGenerateObject,
   StructuredGenerationError,
@@ -47,6 +53,7 @@ import {
 import {
   formatQualificationModelFailure,
   REQUIRED_PROBLEM_SOURCE_UNAVAILABLE,
+  ACCOUNT_SOURCE_UNAVAILABLE,
 } from "./qualificationFailureCore";
 import {
   isRequiredProblemCriterion,
@@ -62,9 +69,9 @@ export const MAX_QUALIFICATION_OUTPUT_TOKENS = 16_384;
 
 const qualificationLogger = logger.withScope("QualificationCore");
 class RequiredProblemSourceUnavailable extends Error {
-  constructor() {
+  constructor(peerOrSite = false) {
     super(
-      `${REQUIRED_PROBLEM_SOURCE_UNAVAILABLE}. Retry acquisition before issuing a negative verdict.`
+      `${peerOrSite ? ACCOUNT_SOURCE_UNAVAILABLE : REQUIRED_PROBLEM_SOURCE_UNAVAILABLE}. Retry acquisition before issuing a negative verdict.`
     );
   }
 }
@@ -159,8 +166,12 @@ const problemAssessmentSchema = z.object({
 const llmQualificationWithProblemSchema = llmQualificationSchema.extend({
   problemEvidence: problemAssessmentSchema,
 });
+const llmPeerQualificationSchema = llmQualificationSchema.extend({
+  routeAssessment: peerRouteSchema,
+});
 type EvaluatorResponse = z.infer<typeof llmQualificationSchema> & {
   problemEvidence?: z.infer<typeof problemAssessmentSchema>;
+  routeAssessment?: PeerRouteProposal;
 };
 
 function verifyProblemEvidence(
@@ -404,6 +415,7 @@ export async function qualifyProspectCore(
   const requiresProblemEvidence = targetingSpec.criteria.some(
     isRequiredProblemCriterion
   );
+  const peerOrSite = targetingSpec.discoveryMode === "peer_or_site_audit";
   const candidates = prepareQualificationCandidates({
     platform,
     evidencePosts: evidencePosts.slice(0, MAX_EVIDENCE_POSTS),
@@ -446,8 +458,11 @@ export async function qualifyProspectCore(
   }
 
   if (candidates.length === 0) {
-    if (requiresProblemEvidence && params.problemSourceUnavailable)
-      throw new RequiredProblemSourceUnavailable();
+    if (
+      (requiresProblemEvidence && params.problemSourceUnavailable) ||
+      (peerOrSite && employerEvidence?.siteProblemFetchRetryable === true)
+    )
+      throw new RequiredProblemSourceUnavailable(peerOrSite);
     return {
       qualified: false,
       score: 0,
@@ -464,6 +479,14 @@ export async function qualifyProspectCore(
         status: "validated",
         candidates,
         sources: [],
+        routeAssessment: peerOrSite
+          ? {
+              ...noPeerRoute(
+                "Research only: no verified contact evidence was available."
+              ),
+              needsContactVerification: true,
+            }
+          : undefined,
         discoveryQueries,
         validatedAt: now,
       }),
@@ -521,7 +544,7 @@ ${discoveryQueries.join(", ") || "None"}
 
 ## Prospect Profile Data
 \`\`\`json
-${JSON.stringify(profileData, null, 2)}
+${JSON.stringify(peerOrSite ? { ...profileData, employerEvidence: undefined } : profileData, null, 2)}
 \`\`\`
 
 ## Persisted Candidate Sources and Their Attribution
@@ -543,7 +566,10 @@ First complete goalAssessment: separate factual audience matches from usefulness
 
 ${requiresProblemEvidence ? `A third eligible primary source is observed_site_problem: ReacherX verified an actual link on a live official source page to a commercial/docs destination returning HTTP 404/410 twice, within 14 days. Use the recorded status fact for problemQuote and the destination URL or link label for affectedPageQuote; copy both verbatim from the machine record. Assess whether that exact defect is an unresolved problem the offered service can remedy. Use observedAt, not a publication date. Never call the measurement a statement by the person/company, and set attributedToEmployer=false. It can support only the marked need, never another criterion, a goal contradiction or individual intent.` : ""}
 
+${peerOrSite ? `This workspace has two independent acquisition paths. A documented comparable offer sold to the relevant buyer/use qualifies even with existing SEO, successful work, unknown purchasing intent and no personal posts. Do not infer a peer from a customer, supplier, partner, technology user or shared industry alone. For peer require peer_fit=matched and quote what this employer actually sells. For another company, use observed_problem only for a verified current HTTP finding, testable_opportunity for a specific plausible improvement on an inspected page, or exploration for a justified question about specific visible products, documentation, services or content worth discussing. A healthy site can support exploration. A generic title, URL, news item or vague "could improve SEO" is insufficient. Do not claim a defect, urgency, demand, budget or intent from a hypothesis. Use need=unknown when appropriate. For routeAssessment give the sourceUrl and verbatim sourceQuote. Explain the buyer/offer similarity or site observation in rationale and the work or test in offerOrRemedy. For 404/410 quote the measured HTTP status and cite the live linking page. Use verified employer reviewedPages (HTTP 200 and observedAt), the official employer profile description (company sourceUrl), or separately verified company sources. A verified contact profile describing a relevant role supports qualification even without a personal publication. Return none and empty missing fields when neither route is grounded. Keep criterion verdicts and numerical scores honest, independently of route. Verified employer evidence: ${JSON.stringify(employerEvidence ?? null)}` : ""}
+
 Return exactly one criterionResults entry for every targeting criterion ID.
+${peerOrSite ? "For role, cite the verified personal profile Candidate ID and an evidence decision quoting their current responsibility. A corporate page cannot establish the person's role." : ""}
 - matched means the available profile or correctly attributed candidate evidence directly satisfies the criterion, within the source restrictions above.
 - partial means there is genuine but incomplete support.
 - For a required role, authority, affiliation, or relationship, evidence of participation alone is partial unless it establishes the specific requested relationship. First-person company language is evidence of involvement, not by itself proof of an unmentioned title or final decision authority. A preferred relationship can remain partial and still be useful. Apply this distinction consistently without assuming a title from an announcement.
@@ -585,10 +611,15 @@ Evaluate this prospect against the ICP.`;
     const generateQualificationCandidate = async (repairInstruction?: string) =>
       await robustGenerateObject<EvaluatorResponse>({
         operation: "qualifyProspect",
-        schema: requiresProblemEvidence
-          ? llmQualificationWithProblemSchema
-          : llmQualificationSchema,
-        system: [buildQualificationPrompt(useCaseKey), workspaceMemoryPolicy]
+        schema: peerOrSite
+          ? llmPeerQualificationSchema
+          : requiresProblemEvidence
+            ? llmQualificationWithProblemSchema
+            : llmQualificationSchema,
+        system: [
+          buildQualificationPrompt(useCaseKey, peerOrSite),
+          workspaceMemoryPolicy,
+        ]
           .filter(Boolean)
           .join("\n\n"),
         prompt: repairInstruction
@@ -734,6 +765,17 @@ Evaluate this prospect against the ICP.`;
       threshold: QUALIFICATION_THRESHOLD,
     });
     const scoreBreakdown = targetingScore.breakdown;
+    const route = peerOrSite
+      ? verifyPeerRoute({
+          proposal: object.routeAssessment,
+          spec: targetingSpec,
+          employer: employerEvidence,
+          profile: profileData,
+          sources: qualificationSources,
+          criteria: criterionResults,
+          now,
+        })
+      : undefined;
     const unprovenProblem = requiresProblemEvidence
       ? criterionResults.find(
           (result) =>
@@ -745,9 +787,11 @@ Evaluate this prospect against the ICP.`;
       object.goalAssessment
     );
     if (
-      unprovenProblem &&
-      !unprovenProblem.problemEvidence &&
-      params.problemSourceUnavailable &&
+      ((unprovenProblem &&
+        !unprovenProblem.problemEvidence &&
+        params.problemSourceUnavailable) ||
+        (route?.route === "none" &&
+          employerEvidence?.siteProblemFetchRetryable === true)) &&
       !goalConflict &&
       !object.isLikelyBot
     ) {
@@ -764,15 +808,20 @@ Evaluate this prospect against the ICP.`;
             decision.confidence >= 0.7)
         );
       });
-      if (!independentMismatch) throw new RequiredProblemSourceUnavailable();
+      if (!independentMismatch)
+        throw new RequiredProblemSourceUnavailable(peerOrSite);
     }
-    const finalQualified = passesQualificationGate({
-      modelQualified: targetingScore.qualified && !goalConflict,
-      isLikelyBot: object.isLikelyBot,
-      score: scoreBreakdown.total,
-      threshold: QUALIFICATION_THRESHOLD,
-      verifiedSourceCount: qualificationSources.length,
-    });
+    const finalQualified = route
+      ? route.route !== "none" &&
+        !goalConflict &&
+        targetingScore.hardFailureCriterionIds.length === 0
+      : passesQualificationGate({
+          modelQualified: targetingScore.qualified && !goalConflict,
+          isLikelyBot: object.isLikelyBot,
+          score: scoreBreakdown.total,
+          threshold: QUALIFICATION_THRESHOLD,
+          verifiedSourceCount: qualificationSources.length,
+        });
 
     // A first-pass source-reference mistake must not hide a potential essential
     // activity match from verification. This is only a routing signal: the strong
@@ -813,6 +862,7 @@ Evaluate this prospect against the ICP.`;
         status: "validated",
         candidates,
         sources: qualificationSources,
+        routeAssessment: route,
         discoveryQueries,
         validatedAt: now,
       }),
@@ -822,7 +872,12 @@ Evaluate this prospect against the ICP.`;
         flags: object.botFlags,
         now,
       }),
-      matchReasoning: unprovenProblem?.rationale ?? object.reasoning,
+      matchReasoning:
+        route &&
+        (finalQualified ||
+          (!goalConflict && !targetingScore.hardFailureCriterionIds.length))
+          ? route.rationale
+          : (unprovenProblem?.rationale ?? object.reasoning),
       reasoning: goalConflict
         ? `${object.reasoning} Evidence contradicts the user's contact goal: ${object.goalAssessment.rationale} Quote: ${object.goalAssessment.conflictingQuote}`
         : targetingScore.hardFailureCriterionIds.length > 0

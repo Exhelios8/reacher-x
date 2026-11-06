@@ -10,6 +10,7 @@ import { readWebPages, searchWeb } from "./researchCore";
 import {
   observeOfficialSiteProblem,
   QualificationSiteProblemRetryableError,
+  reviewOfficialSitePages,
 } from "./qualificationSiteProblemCore";
 import { getLearningTargetingFingerprint } from "./learningTargetingHelpers";
 import { buildLegacyWorkspaceTargetingSpec } from "./targetingSpecCore";
@@ -21,6 +22,7 @@ vi.mock("./researchCore", () => ({
 vi.mock("./qualificationSiteProblemCore", async (importOriginal) => ({
   ...(await importOriginal<typeof import("./qualificationSiteProblemCore")>()),
   observeOfficialSiteProblem: vi.fn(),
+  reviewOfficialSitePages: vi.fn(),
 }));
 beforeEach(() => {
   vi.stubEnv("ACCOUNT_FIRST_DISCOVERY_WORKSPACE_IDS", "workspace");
@@ -29,6 +31,11 @@ beforeEach(() => {
   vi.mocked(observeOfficialSiteProblem)
     .mockReset()
     .mockResolvedValue(undefined);
+  vi.mocked(reviewOfficialSitePages).mockReset().mockResolvedValue({
+    reviewedPages: [],
+    siteProblems: [],
+    retryable: false,
+  });
 });
 afterEach(() => vi.unstubAllEnvs());
 
@@ -873,6 +880,187 @@ describe("verified current employer context", () => {
       }
     }
   );
+
+  test.each(["preferred", "none"] as const)(
+    "mode audits a healthy current employer without a required problem or post: %s",
+    async (criteria) => {
+      const mock = context();
+      const targetingSpec = buildLegacyWorkspaceTargetingSpec({
+        description: "Find relevant offers and opportunities to explore",
+        profiles: [],
+      });
+      targetingSpec.discoveryMode = "peer_or_site_audit";
+      targetingSpec.criteria =
+        criteria === "none"
+          ? []
+          : [
+              {
+                ...targetingSpec.criteria[0],
+                id: "need",
+                kind: "preferred",
+                category: "intent",
+                evidence: "either",
+                requiresProblemEvidence: undefined,
+              },
+            ];
+      vi.mocked(mock.ctx.runQuery).mockResolvedValue({
+        description: targetingSpec.summary,
+        targetingSpec,
+        icps: [],
+      });
+      mock.runAction
+        .mockReset()
+        .mockResolvedValueOnce({ success: true, profile: employerProfile })
+        .mockResolvedValueOnce({ success: true, company });
+      const reviewedPage = {
+        url: `${company.website}/solutions`,
+        finalUrl: `${company.website}/solutions`,
+        title: "Courses products",
+        observedAt: new Date().toISOString(),
+        text: "Courses provides software and learning resources for commercial business teams.",
+        httpStatus: 200 as const,
+        provenance: "native_http" as const,
+      };
+      vi.mocked(reviewOfficialSitePages).mockResolvedValue({
+        reviewedPages: [reviewedPage],
+        siteProblems: [],
+        retryable: false,
+      });
+      vi.mocked(searchWeb).mockRejectedValue(
+        new Error("HTTP 503 provider unavailable")
+      );
+      const result = await collectQualificationDiscoveryEvidence(
+        mock.ctx,
+        socialProspect
+      );
+      expect(reviewOfficialSitePages).toHaveBeenCalledExactlyOnceWith({
+        companyId: "42",
+        officialWebsite: company.website,
+      });
+      expect(readWebPages).not.toHaveBeenCalled();
+      expect(searchWeb).not.toHaveBeenCalled();
+      expect(observeOfficialSiteProblem).not.toHaveBeenCalled();
+      expect(result?.evidencePosts).toEqual([]);
+      expect(result?.profileData.qualificationContextVersion).toBe(5);
+      expect(result?.employerEvidence).toMatchObject({
+        companyId: "42",
+        personUrn: "ACo123",
+        reviewedPages: [reviewedPage],
+        reviewedPage,
+        siteProblems: [],
+      });
+      expect(getQualificationProfileText(result!.profileData)).not.toContain(
+        reviewedPage.text
+      );
+      const actionCalls = mock.runAction.mock.calls.length;
+      await collectQualificationDiscoveryEvidence(mock.ctx, {
+        ...socialProspect,
+        qualificationProfileData: result!.profileData,
+        qualificationEvidenceFetchedAt: Date.now(),
+      });
+      expect(mock.runAction).toHaveBeenCalledTimes(actionCalls);
+      expect(reviewOfficialSitePages).toHaveBeenCalledOnce();
+    }
+  );
+
+  test.each(["stale", "fingerprint", "identity", "old-version"])(
+    "mode refreshes cached native site context on %s",
+    async (reason) => {
+      const mock = context();
+      const targetingSpec = buildLegacyWorkspaceTargetingSpec({
+        description: "Explore useful pages",
+        profiles: [],
+      });
+      targetingSpec.discoveryMode = "peer_or_site_audit";
+      targetingSpec.criteria = [];
+      vi.mocked(mock.ctx.runQuery).mockResolvedValue({
+        targetingSpec,
+        icps: [],
+      });
+      mock.runAction
+        .mockReset()
+        .mockResolvedValueOnce({ success: true, profile: employerProfile })
+        .mockResolvedValueOnce({ success: true, company });
+      const first = await collectQualificationDiscoveryEvidence(
+        mock.ctx,
+        socialProspect
+      );
+      mock.runAction
+        .mockReset()
+        .mockResolvedValueOnce({ success: true, profile: employerProfile })
+        .mockResolvedValueOnce({ success: true, company });
+      const cached = {
+        ...first!.profileData,
+        ...(reason === "fingerprint"
+          ? { qualificationTargetingFingerprint: "obsolete" }
+          : {}),
+        ...(reason === "identity" ? { urn: "ACoOTHER" } : {}),
+        ...(reason === "old-version" ? { qualificationContextVersion: 4 } : {}),
+      };
+      await collectQualificationDiscoveryEvidence(mock.ctx, {
+        ...socialProspect,
+        qualificationProfileData: cached,
+        qualificationEvidenceFetchedAt:
+          reason === "stale" ? Date.now() - 2 * 86_400_000 : Date.now(),
+      });
+      expect(mock.runAction).toHaveBeenCalledTimes(2);
+      expect(reviewOfficialSitePages).toHaveBeenCalledTimes(2);
+    }
+  );
+
+  test("mode remains opt-in and does not replace existing homepage collection for other tenants", async () => {
+    vi.stubEnv("ACCOUNT_FIRST_DISCOVERY_WORKSPACE_IDS", "another-workspace");
+    const mock = context();
+    const targetingSpec = buildLegacyWorkspaceTargetingSpec({
+      description: "Explore useful pages",
+      profiles: [],
+    });
+    targetingSpec.discoveryMode = "peer_or_site_audit";
+    vi.mocked(mock.ctx.runQuery).mockResolvedValue({ targetingSpec, icps: [] });
+    mock.runAction
+      .mockReset()
+      .mockResolvedValueOnce({ success: true, profile: employerProfile })
+      .mockResolvedValueOnce({ success: true, company });
+    const result = await collectQualificationDiscoveryEvidence(
+      mock.ctx,
+      socialProspect
+    );
+    expect(result?.profileData.qualificationContextVersion).toBe(2);
+    expect(reviewOfficialSitePages).not.toHaveBeenCalled();
+    expect(readWebPages).toHaveBeenCalledOnce();
+  });
+
+  test("mode keeps verified person/employer context when the native review is temporarily unavailable", async () => {
+    const mock = context();
+    const targetingSpec = buildLegacyWorkspaceTargetingSpec({
+      description: "Explore useful pages",
+      profiles: [],
+    });
+    targetingSpec.discoveryMode = "peer_or_site_audit";
+    targetingSpec.criteria = [];
+    vi.mocked(mock.ctx.runQuery).mockResolvedValue({ targetingSpec, icps: [] });
+    mock.runAction
+      .mockReset()
+      .mockResolvedValueOnce({ success: true, profile: employerProfile })
+      .mockResolvedValueOnce({ success: true, company });
+    vi.mocked(reviewOfficialSitePages).mockResolvedValue({
+      reviewedPages: [],
+      siteProblems: [],
+      retryable: true,
+    });
+    const result = await collectQualificationDiscoveryEvidence(
+      mock.ctx,
+      socialProspect
+    );
+    expect(result?.employerEvidence).toMatchObject({
+      companyId: "42",
+      reviewedPages: [],
+      siteProblems: [],
+      siteProblemFetchRetryable: true,
+      siteProblemRetryAfter: expect.any(Number),
+    });
+    expect(result?.profileData.urn).toBe("ACo123");
+  });
 
   test("read-only re-evaluation of an already decided prospect does not overwrite its cache", async () => {
     const mock = context();

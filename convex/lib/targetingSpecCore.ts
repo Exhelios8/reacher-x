@@ -23,6 +23,38 @@ export function isRequiredProblemCriterion(
   return true;
 }
 export type DiscoveryStage = "strict" | "balanced" | "broad";
+export function validateOperatorTargeting(spec: WorkspaceTargetingSpec): void {
+  spec.criteria.forEach(isRequiredProblemCriterion);
+  if (
+    spec.discoveryMode === "peer_or_site_audit" &&
+    spec.criteria.some(isRequiredProblemCriterion)
+  )
+    throw new Error(
+      "Peer or site audit mode cannot require a prior problem declaration."
+    );
+}
+
+export function isExcludedCompanyDomain(
+  url: string,
+  domains: readonly string[] | undefined
+): boolean {
+  if (!domains?.length) return false;
+  try {
+    const host = new URL(url).hostname.toLowerCase().replace(/\.$/, "");
+    return domains.some((domain) => {
+      const suffix = domain
+        .trim()
+        .toLowerCase()
+        .replace(/^www\./, "")
+        .replace(/\.$/, "");
+      return (
+        Boolean(suffix) && (host === suffix || host.endsWith(`.${suffix}`))
+      );
+    });
+  } catch {
+    return false;
+  }
+}
 
 const MAX_CRITERIA = 12;
 const MAX_TERMS_PER_CRITERION = 12;
@@ -33,6 +65,15 @@ export function preserveRequiredProblemCriterion(
   generated: WorkspaceTargetingSpec,
   previous?: WorkspaceTargetingSpec
 ): WorkspaceTargetingSpec {
+  if (generated.discoveryMode === "peer_or_site_audit") {
+    validateOperatorTargeting(generated);
+    return generated;
+  }
+  if (previous?.discoveryMode === "peer_or_site_audit") {
+    // Generic model output does not express this operator-authored contract. Only an explicit replacement can change it.
+    validateOperatorTargeting(previous);
+    return previous;
+  }
   const required = previous?.criteria.find(isRequiredProblemCriterion);
   if (!required) return generated;
   if (generated.criteria.some((criterion) => criterion.id === required.id)) {
@@ -118,6 +159,7 @@ function toCriterionId(value: string, index: number): string {
 export function normalizeWorkspaceTargetingSpec(
   spec: WorkspaceTargetingSpec
 ): WorkspaceTargetingSpec {
+  validateOperatorTargeting(spec);
   const usedIds = new Set<string>();
   const criteria = spec.criteria
     .slice(0, MAX_CRITERIA)
@@ -155,9 +197,28 @@ export function normalizeWorkspaceTargetingSpec(
 
   return {
     version: 1,
+    ...(spec.discoveryMode ? { discoveryMode: spec.discoveryMode } : {}),
     summary: normalizeText(spec.summary).slice(0, 600),
     criteria,
     searchHints: {
+      ...(spec.searchHints.peerOfferPhrases
+        ? {
+            peerOfferPhrases: uniqueText(
+              spec.searchHints.peerOfferPhrases,
+              MAX_SEARCH_HINTS_PER_GROUP
+            ),
+          }
+        : {}),
+      ...(spec.searchHints.excludedCompanyDomains
+        ? {
+            excludedCompanyDomains: uniqueText(
+              spec.searchHints.excludedCompanyDomains.map((value) =>
+                value.trim().toLowerCase()
+              ),
+              MAX_SEARCH_HINTS_PER_GROUP
+            ),
+          }
+        : {}),
       entities: uniqueText(
         spec.searchHints.entities,
         MAX_SEARCH_HINTS_PER_GROUP

@@ -110,6 +110,49 @@ function exampleSpec(): WorkspaceTargetingSpec {
   };
 }
 
+test("a peer-or-audit specification survives ordinary regeneration and explicitly replaces earlier strict problem controls", () => {
+  const generated = exampleSpec();
+  const previousNeed: WorkspaceTargetingSpec = {
+    ...generated,
+    criteria: [
+      {
+        ...generated.criteria[0],
+        id: "need",
+        kind: "required",
+        category: "intent",
+        evidence: "either",
+        requiresProblemEvidence: true,
+      },
+    ],
+  };
+  const supplied: WorkspaceTargetingSpec = {
+    ...generated,
+    discoveryMode: "peer_or_site_audit",
+    criteria: [
+      {
+        ...previousNeed.criteria[0],
+        kind: "preferred",
+        requiresProblemEvidence: undefined,
+      },
+    ],
+    searchHints: {
+      ...generated.searchHints,
+      peerOfferPhrases: ["infrastructure voix temps réel"],
+      excludedCompanyDomains: ["client.example"],
+    },
+  };
+  const v3 = normalizeWorkspaceTargetingSpec(supplied);
+  expect(preserveRequiredProblemCriterion(generated, v3)).toEqual(v3);
+  expect(preserveRequiredProblemCriterion(v3, previousNeed)).toEqual(v3);
+  expect(v3.searchHints.excludedCompanyDomains).toEqual(["client.example"]);
+  expect(v3.searchHints.peerOfferPhrases).toEqual([
+    "infrastructure voix temps réel",
+  ]);
+  expect(() =>
+    normalizeWorkspaceTargetingSpec({ ...v3, criteria: previousNeed.criteria })
+  ).toThrow("cannot require");
+});
+
 describe("workspace targeting specification", () => {
   test.each([
     ["US", "business owners"],

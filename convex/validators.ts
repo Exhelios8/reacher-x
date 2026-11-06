@@ -115,6 +115,8 @@ export const targetingCriterionValidator = v.object({
 });
 
 export const targetingSearchHintsValidator = v.object({
+  peerOfferPhrases: v.optional(v.array(v.string())),
+  excludedCompanyDomains: v.optional(v.array(v.string())),
   entities: v.array(v.string()),
   activityPhrases: v.optional(v.array(v.string())),
   // Deprecated compatibility fields for targeting specs produced before the
@@ -154,6 +156,7 @@ export const targetingSearchFiltersValidator = v.object({
 
 export const workspaceTargetingSpecValidator = v.object({
   version: v.literal(1),
+  discoveryMode: v.optional(v.literal("peer_or_site_audit")),
   // Deprecated compatibility field. New setup generations use only summary
   // and atomic criteria, without a fixed use-case taxonomy.
   intent: v.optional(v.string()),
@@ -1461,8 +1464,30 @@ export const qualificationSourceValidator = v.object({
   sourcePost: v.any(),
 });
 
+export const qualificationRouteAssessmentValidator = v.object({
+  needsContactVerification: v.optional(v.literal(true)),
+  route: v.union(
+    v.literal("peer"),
+    v.literal("observed_problem"),
+    v.literal("testable_opportunity"),
+    v.literal("exploration"),
+    v.literal("none")
+  ),
+  sourceUrl: v.optional(v.string()),
+  sourceQuote: v.optional(v.string()),
+  observedAt: v.optional(v.string()),
+  rationale: v.string(),
+  offerOrRemedy: v.optional(v.string()),
+  needStatus: v.union(
+    v.literal("confirmed"),
+    v.literal("hypothesis"),
+    v.literal("unknown")
+  ),
+});
+
 export const qualificationVerificationValidator = v.object({
   version: v.literal(1),
+  routeAssessment: v.optional(qualificationRouteAssessmentValidator),
   status: v.union(v.literal("validated"), v.literal("failed")),
   validatedAt: v.number(),
   candidateSourceCount: v.number(),

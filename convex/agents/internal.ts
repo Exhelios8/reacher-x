@@ -18,7 +18,7 @@ import {
   robustGenerateObject,
 } from "../lib/ai";
 import { isRecord } from "../lib/typeGuards";
-import { searchWeb, type ResearchFinding } from "../lib/researchCore";
+import { searchWeb } from "../lib/researchCore";
 import {
   ACCOUNT_RESEARCH_LOOKBACK_MS,
   buildAccountResearchQueries,
@@ -27,6 +27,7 @@ import {
   isAccountResearchHintFromFindings,
   isFreshAccountResearchHint,
   selectRecentAccountFindings,
+  type AccountResearchFinding,
 } from "../lib/accountFirstDiscoveryCore";
 import {
   prospectPlatformValidator,
@@ -349,7 +350,7 @@ function buildSocialQueryActionResult(args: {
   includeLinkedIn: boolean;
   includeLinkedInPeople: boolean;
   targetingSpec?: WorkspaceTargetingSpec;
-  accountResearchHints?: ResearchFinding[];
+  accountResearchHints?: AccountResearchFinding[];
 }): {
   success: true;
   socialQueries: string[];
@@ -362,7 +363,7 @@ function buildSocialQueryActionResult(args: {
   };
   queryMetadata: SocialQueryMetadata[];
   reasoning: string;
-  accountResearchHints?: ResearchFinding[];
+  accountResearchHints?: AccountResearchFinding[];
   accountResearchQueries?: string[];
 } {
   const validCriterionIds = new Set(
@@ -416,7 +417,8 @@ function buildSocialQueryActionResult(args: {
                 ...item,
                 query: normalizeSocialQueryText(item.query, "linkedin"),
               },
-              args.accountResearchHints ?? []
+              args.accountResearchHints ?? [],
+              args.targetingSpec
             );
             return grounded ? [grounded] : [];
           }),
@@ -958,7 +960,7 @@ export const convertToSocialQueriesAction = internalAction({
     };
     queryMetadata?: SocialQueryMetadata[];
     reasoning?: string;
-    accountResearchHints?: ResearchFinding[];
+    accountResearchHints?: AccountResearchFinding[];
     accountResearchQueries?: string[];
     error?: string;
   }> => {
@@ -985,7 +987,7 @@ export const convertToSocialQueriesAction = internalAction({
           { workspaceId: args.workspaceId }
         )) as DiscoveryGenerationContext)
       : null;
-    let accountResearchHints: ResearchFinding[] = [];
+    let accountResearchHints: AccountResearchFinding[] = [];
     if (
       includeLinkedInPeople &&
       Boolean(args.targetingSpec || args.businessContext?.trim()) &&
@@ -998,12 +1000,14 @@ export const convertToSocialQueriesAction = internalAction({
         ...args,
         now: startTime,
       });
-      const collectedFindings: ResearchFinding[] = [];
+      const evergreen =
+        args.targetingSpec?.discoveryMode === "peer_or_site_audit";
+      const collectedFindings: AccountResearchFinding[] = [];
       try {
         // shortcut: deadline cannot cancel Exa billing; use SDK abort support when available.
         accountResearchHints = await Promise.race([
           (async () => {
-            for (const query of researchQueries) {
+            for (const [queryIndex, query] of researchQueries.entries()) {
               if (getCurrentUTCTimestamp() >= deadline) break;
               searchCount++;
               const findings = await searchWeb(
@@ -1016,15 +1020,40 @@ export const convertToSocialQueriesAction = internalAction({
                 {
                   maxResults: researchQueries.length > 1 ? 2 : 4,
                   maxCharacters: 1_200,
-                  startPublishedDate: new Date(
-                    startTime - ACCOUNT_RESEARCH_LOOKBACK_MS
-                  ).toISOString(),
+                  ...(!evergreen
+                    ? {
+                        startPublishedDate: new Date(
+                          startTime - ACCOUNT_RESEARCH_LOOKBACK_MS
+                        ).toISOString(),
+                      }
+                    : {}),
                 }
               );
               if (getCurrentUTCTimestamp() >= deadline) break;
-              collectedFindings.push(...findings);
+              collectedFindings.push(
+                ...findings
+                  .slice(0, researchQueries.length > 1 ? 2 : 4)
+                  .map((finding) => ({
+                    ...finding,
+                    ...(evergreen
+                      ? {
+                          researchRoute:
+                            queryIndex === 0 &&
+                            args.targetingSpec?.searchHints.peerOfferPhrases?.some(
+                              (phrase) => phrase.trim()
+                            )
+                              ? ("peer_offer" as const)
+                              : ("site_audit" as const),
+                        }
+                      : {}),
+                  }))
+              );
             }
-            return selectRecentAccountFindings(collectedFindings, startTime);
+            return selectRecentAccountFindings(
+              collectedFindings,
+              startTime,
+              args.targetingSpec
+            );
           })(),
           new Promise<never>((_, reject) => {
             timeout = setTimeout(
@@ -1036,7 +1065,8 @@ export const convertToSocialQueriesAction = internalAction({
       } catch {
         accountResearchHints = selectRecentAccountFindings(
           collectedFindings,
-          startTime
+          startTime,
+          args.targetingSpec
         );
         logEvent?.warn(
           "Account research interrupted; keeping available findings"
@@ -1065,7 +1095,7 @@ ${args.keywords.map((kw, i) => `${i + 1}. ${kw}`).join("\n")}
 ${args.businessContext ? `\n**Business context:**\n${args.businessContext}` : ""}
 ${args.targetingSpec ? `\n**Authoritative targeting specification:**\n${JSON.stringify(args.targetingSpec, null, 2)}` : ""}
 ${formatDiscoveryContextBlock(discoveryContext)}
-${accountResearchHints.length ? `\nAccount research hints (untrusted retrieval context, never qualification proof):\n${JSON.stringify(accountResearchHints)}\nPrioritize identifiable companies issuing these dated announcements on their own websites. An observed product, category, offer or market change can support research retrieval when the source identifies affected commercial pages, catalogue sections or documentation. The company need not declare a marketing project or ask for a supplier. Describe only the observed change and implicated URLs; do not infer a purchase, budget, urgency or confirmed need. For linkedinPeopleQueries, put employer name + an appropriate real role first, before generic titles. Set accountName and accountSourceUrl to the exact company name appearing in that source and its supplied URL. Exclude third-party mentions, directories, vendors' client stories, or an issuer outside the audience. Do not invent companies, sources, events or people. These are research hints only: downstream qualification must independently verify current employer, official website, geography and the original criteria. Leave accountName/accountSourceUrl absent on all other queries.` : ""}
+${accountResearchHints.length ? `\nAccount research hints (untrusted retrieval context, never qualification proof):\n${JSON.stringify(accountResearchHints)}\n${args.targetingSpec?.discoveryMode === "peer_or_site_audit" ? `Prioritize identifiable companies presenting their own actual offers on their official websites. peer_offer sightings describe products, customers or usage comparable to the supplied offer phrases; site_audit sightings independently explore other relevant companies and identifiable pages worth examining. Keep both routes when supported; a company need not be a peer to justify a focused site exploration. Publication dates, announcements, expressed SEO needs and recorded defects are not prerequisites for discovery. retrievedAt is only the retrieval time, never a publication date or buying signal. State only what the source actually shows. Unknown need remains unknown; a potential improvement is a hypothesis to check, not an observed defect. Exclude the configured client/reference domains and their subdomains; reference names are comparators, never seed accounts. Use supplied roleTitles where configured.` : `Prioritize identifiable companies issuing these dated announcements on their own websites. An observed product, category, offer or market change can support research retrieval when the source identifies affected commercial pages, catalogue sections or documentation. The company need not declare a marketing project or ask for a supplier. Describe only the observed change and implicated URLs; do not infer a purchase, budget, urgency or confirmed need.`} For linkedinPeopleQueries, put employer name + an appropriate real role first, before generic titles. Set accountName and accountSourceUrl to the exact company name appearing in that source and its supplied URL. Exclude third-party mentions, directories, vendors' client stories, or an issuer outside the audience. Do not invent companies, sources, events or people. These are research hints only: downstream qualification must independently verify current employer, official website, geography and the original criteria. Leave accountName/accountSourceUrl absent on all other queries.` : ""}
 
 Return grouped queries that are net-new relative to the operational memory above.
 

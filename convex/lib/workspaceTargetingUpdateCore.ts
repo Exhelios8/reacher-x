@@ -8,7 +8,7 @@ import {
 } from "./workspaceProfileChangeCore";
 import { reconcileWorkspaceIcpUpdate } from "./workspaceIcpSignalsCore";
 import {
-  isRequiredProblemCriterion,
+  validateOperatorTargeting,
   type WorkspaceTargetingSpec,
 } from "./targetingSpecCore";
 
@@ -73,7 +73,7 @@ export function buildRegeneratedWorkspaceTargetingPatch(args: {
   updatedAt: number;
 }) {
   // Explicit operator updates can reach this persistence boundary without model normalization.
-  args.targetingSpec.criteria.forEach(isRequiredProblemCriterion);
+  validateOperatorTargeting(args.targetingSpec);
   return {
     rawUserDescription: args.rawUserDescription,
     seedDescription: args.rawUserDescription,

@@ -4,7 +4,7 @@ import { afterEach, expect, test, vi } from "vitest";
 import { internal } from "./_generated/api";
 import schema from "./schema";
 import { robustGenerateObject } from "./lib/ai";
-import { searchWeb } from "./lib/researchCore";
+import { searchWeb, type ResearchFinding } from "./lib/researchCore";
 import { buildLegacyWorkspaceTargetingSpec } from "./lib/targetingSpecCore";
 
 vi.mock("./lib/ai", async (importOriginal) => ({
@@ -32,7 +32,9 @@ const item = (query: string) => ({
   searchMode: "raw" as const,
 });
 function generation(
-  accounts = [{ name: "Acme", finding }],
+  accounts: Array<{ name: string; finding: ResearchFinding }> = [
+    { name: "Acme", finding },
+  ],
   twitterQueries = [item("développement commercial")]
 ) {
   return {
@@ -416,3 +418,176 @@ test.each([false, true])(
     ).toBe(grounded ? marker : undefined);
   }
 );
+
+test("evergreen offers and a separate nonpeer exploration reach the native people queue without a publication or need", async () => {
+  const { t, workspaceId } = await fixture();
+  const spec = buildLegacyWorkspaceTargetingSpec({
+    description: "Relevant French businesses",
+    profiles: [],
+  });
+  spec.discoveryMode = "peer_or_site_audit";
+  spec.searchHints.peerOfferPhrases = ["logiciel de gestion professionnelle"];
+  spec.searchHints.activityPhrases = ["catalogue distributeur professionnel"];
+  spec.searchHints.roleTitles = ["directeur marketing"];
+  spec.searchHints.languageCodes = ["fr"];
+  spec.searchHints.locations = ["France"];
+  spec.searchHints.excludedCompanyDomains = ["client.fr"];
+  await t.run((ctx) => ctx.db.patch(workspaceId, { targetingSpec: spec }));
+  const offer = {
+    title: "Acme logiciels de gestion",
+    url: "https://acme.fr/produits",
+    snippet:
+      "Acme vend un logiciel de gestion pour les entreprises françaises. Aucun besoin SEO exprimé.",
+  };
+  const auditSite = {
+    title: "Beta catalogue professionnel",
+    url: "https://beta.fr/catalogue",
+    snippet:
+      "Beta distribue des équipements aux professionnels en France. Catalogue et pages de demandes consultables. Aucun défaut constaté.",
+  };
+  const excluded = {
+    title: "Client offre",
+    url: "https://portal.client.fr/offre",
+    snippet: "Client vend des logiciels.",
+  };
+  const overflow = {
+    title: "Overflow",
+    url: "https://overflow.fr",
+    snippet: "Overflow vend un produit.",
+  };
+  vi.mocked(searchWeb)
+    .mockResolvedValueOnce([offer, excluded, overflow])
+    .mockResolvedValueOnce([auditSite, auditSite, overflow]);
+  vi.mocked(robustGenerateObject).mockResolvedValue(
+    generation([
+      { name: "Acme", finding: offer },
+      { name: "Beta", finding: auditSite },
+    ])
+  );
+  const result = await t.action(
+    internal.agents.internal.convertToSocialQueriesAction,
+    {
+      workspaceId,
+      targetingSpec: spec,
+      keywords: ["offre"],
+      platforms: ["linkedin"],
+    }
+  );
+  expect(searchWeb).toHaveBeenCalledTimes(2);
+  expect(vi.mocked(searchWeb).mock.calls.map((call) => call[0])).toEqual([
+    "logiciel de gestion professionnelle France site officiel",
+    "catalogue distributeur professionnel France site officiel",
+  ]);
+  expect(
+    vi
+      .mocked(searchWeb)
+      .mock.calls.every(
+        (call) =>
+          call[2]?.maxResults === 2 && call[2].startPublishedDate === undefined
+      )
+  ).toBe(true);
+  expect(result.accountResearchHints).toHaveLength(2);
+  expect(
+    result.accountResearchHints?.map((hint) => hint.researchRoute)
+  ).toEqual(["peer_offer", "site_audit"]);
+  expect(
+    result.accountResearchHints?.every(
+      (hint) => hint.retrievedAt && !hint.publishedDate
+    )
+  ).toBe(true);
+  const prompt = vi.mocked(robustGenerateObject).mock.calls[0][0].prompt;
+  expect(prompt).not.toContain(excluded.url);
+  expect(prompt).not.toContain(overflow.url);
+  expect(prompt).toContain("Unknown need remains unknown");
+  expect(result.accountResearchQueries).toEqual([
+    "Acme directeur marketing",
+    "Beta directeur marketing",
+  ]);
+  await t.mutation(internal.workflows.prospecting.saveKeywordsInternal, {
+    workspaceId,
+    seedKeywords: [],
+    discoveredKeywords: [],
+    socialQueries: result.accountResearchQueries!,
+    queryMetadata: result.queryMetadata,
+  });
+  const queue = await t.query(internal.keywords.getPrioritizedLinkedInQueries, {
+    workspaceId,
+    surface: "people",
+    limit: 2,
+  });
+  expect(queue.map((row) => row.value)).toEqual(result.accountResearchQueries);
+  const saved = await t.run((ctx) => ctx.db.get(queue[0].id));
+  expect(saved?.source).toMatch(/^account_retrieval_hint:/);
+  await t.run(async (ctx) => {
+    await ctx.db.patch(queue[0].id, { status: "deprecated" });
+    await ctx.db.patch(queue[1].id, { lastSearchedLinkedInAt: 123 });
+  });
+  await t.mutation(internal.workflows.prospecting.saveKeywordsInternal, {
+    workspaceId,
+    seedKeywords: [],
+    discoveredKeywords: [],
+    socialQueries: result.accountResearchQueries!,
+    queryMetadata: result.queryMetadata,
+  });
+  expect((await t.run((ctx) => ctx.db.get(queue[0].id)))?.status).toBe(
+    "deprecated"
+  );
+  expect(
+    (await t.run((ctx) => ctx.db.get(queue[1].id)))?.lastSearchedLinkedInAt
+  ).toBe(123);
+});
+
+test("the model cannot forge an undated hint or target an unrelated role", async () => {
+  const { t, workspaceId } = await fixture();
+  const spec = buildLegacyWorkspaceTargetingSpec({
+    description: "French businesses",
+    profiles: [],
+  });
+  spec.discoveryMode = "peer_or_site_audit";
+  spec.searchHints.peerOfferPhrases = ["logiciel professionnel"];
+  spec.searchHints.activityPhrases = ["catalogue distributeur"];
+  spec.searchHints.roleTitles = ["directeur marketing"];
+  const offer = {
+    title: "Acme logiciels",
+    url: "https://acme.fr/offre",
+    snippet: "Acme vend un logiciel.",
+  };
+  vi.mocked(searchWeb).mockResolvedValue([offer]);
+  const forged = `account_retrieval_hint:${Date.now()}|${offer.url}`;
+  vi.mocked(robustGenerateObject).mockResolvedValue({
+    object: {
+      twitterQueries: [
+        { ...item("Acme directeur marketing"), sourceKeyword: forged },
+      ],
+      linkedinPostQueries: [],
+      linkedinPeopleQueries: [
+        {
+          ...item("Acme stagiaire"),
+          accountName: "Acme",
+          accountSourceUrl: offer.url,
+        },
+      ],
+      reasoning: "Untrusted model output",
+    },
+    model: "fixture",
+    usage: {},
+  } as never);
+  const result = await t.action(
+    internal.agents.internal.convertToSocialQueriesAction,
+    {
+      workspaceId,
+      targetingSpec: spec,
+      keywords: ["offre"],
+      platforms: ["twitter", "linkedin"],
+    }
+  );
+  expect(result.accountResearchQueries).toBeUndefined();
+  expect(result.queriesByPlatform?.linkedin.people).not.toContain(
+    "Acme stagiaire"
+  );
+  expect(
+    result.queryMetadata?.find(
+      (metadata) => metadata.query === "Acme directeur marketing"
+    )?.sourceKeyword
+  ).toBeUndefined();
+});

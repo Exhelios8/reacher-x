@@ -583,6 +583,7 @@ export function buildVerifiedQualificationSources(args: {
 }
 
 export function buildQualificationVerification(args: {
+  routeAssessment?: QualificationVerification["routeAssessment"];
   status: QualificationVerification["status"];
   candidates: QualificationCandidate[];
   sources: QualificationSource[];
@@ -591,6 +592,7 @@ export function buildQualificationVerification(args: {
 }): QualificationVerification {
   return {
     version: 1,
+    ...(args.routeAssessment ? { routeAssessment: args.routeAssessment } : {}),
     status: args.status,
     validatedAt: args.validatedAt,
     candidateSourceCount: args.candidates.length,

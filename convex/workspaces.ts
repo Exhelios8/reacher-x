@@ -70,7 +70,7 @@ import {
   type WorkspaceUseCaseKey,
 } from "../shared/lib/workspaceUseCases";
 import { QUALIFICATION_THRESHOLD } from "../shared/lib/qualificationConstants";
-import { isRequiredProblemCriterion } from "./lib/targetingSpecCore";
+import { validateOperatorTargeting } from "./lib/targetingSpecCore";
 import { deleteWorkspaceCascade } from "./lib/deleteWorkspaceCascade";
 import {
   doesSetupSessionReserveEntitlementSlot,
@@ -1865,7 +1865,7 @@ export const createWorkspaceInternal = internalMutation({
       }
     }
 
-    args.targetingSpec?.criteria.forEach(isRequiredProblemCriterion);
+    if (args.targetingSpec) validateOperatorTargeting(args.targetingSpec);
     // Create new workspace with v4 fields
     const workspaceId = await ctx.db.insert("workspaces", {
       userId: args.userId,
@@ -1945,7 +1945,7 @@ export const updateWorkspaceInternal = internalMutation({
     };
 
     if (args.targetingSpec !== undefined) {
-      args.targetingSpec.criteria.forEach(isRequiredProblemCriterion);
+      validateOperatorTargeting(args.targetingSpec);
       updateData.targetingSpec = args.targetingSpec;
     }
 
@@ -2033,7 +2033,7 @@ export const updateWorkspaceIcpSignalsInternal = internalMutation({
     }
 
     validateSyntheticProfileExamples(args.icps);
-    args.targetingSpec?.criteria.forEach(isRequiredProblemCriterion);
+    if (args.targetingSpec) validateOperatorTargeting(args.targetingSpec);
     const updateData: Record<string, unknown> = {
       icps: args.icps,
       ...(args.targetingSpec ? { targetingSpec: args.targetingSpec } : {}),

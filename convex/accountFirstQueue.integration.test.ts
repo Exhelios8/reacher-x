@@ -196,3 +196,45 @@ test("only executed queries change search history, and opt-out retains generic q
   expect(normal.some((row) => row.value === "directeur marketing")).toBe(true);
   expect(normal.length).toBeGreaterThan(2);
 });
+
+test("V3 retrieval hints expire after one day and exclude known client subdomains from backlog", async () => {
+  const { t, workspaceId } = await fixture();
+  const workspace = await t.run((ctx) => ctx.db.get(workspaceId));
+  const targetingSpec = {
+    ...workspace!.targetingSpec!,
+    discoveryMode: "peer_or_site_audit" as const,
+    searchHints: {
+      ...workspace!.targetingSpec!.searchHints,
+      excludedCompanyDomains: ["client.fr"],
+    },
+  };
+  await t.run((ctx) => ctx.db.patch(workspaceId, { targetingSpec }));
+  const now = Date.now();
+  await t.mutation(internal.keywords.saveKeywordsBatch, {
+    workspaceId,
+    keywords: [
+      { name: "Current", timestamp: now, url: "https://current.fr/offre" },
+      {
+        name: "Expired",
+        timestamp: now - 86_400_001,
+        url: "https://expired.fr/offre",
+      },
+      { name: "Client", timestamp: now, url: "https://portal.client.fr/offre" },
+    ].map(({ name, timestamp, url }) => ({
+      type: "social_query" as const,
+      value: `${name} directeur marketing`,
+      source: `account_retrieval_hint:${timestamp}|${url}`,
+      platformTargets: ["linkedin" as const],
+      linkedinSurface: "people" as const,
+      queryStyle: "role_title" as const,
+    })),
+  });
+  const queue = await t.query(internal.keywords.getPrioritizedLinkedInQueries, {
+    workspaceId,
+    surface: "people",
+    limit: 2,
+  });
+  expect(queue.map((row) => row.value)).toEqual([
+    "Current directeur marketing",
+  ]);
+});

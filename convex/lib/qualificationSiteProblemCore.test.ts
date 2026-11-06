@@ -2,6 +2,7 @@ import { afterEach, expect, test, vi } from "vitest";
 import {
   observeOfficialSiteProblem,
   QualificationSiteProblemRetryableError,
+  reviewOfficialSitePages,
 } from "./qualificationSiteProblemCore";
 
 const sourceUrl = "https://acme.example/news/new-product";
@@ -43,6 +44,132 @@ afterEach(() => {
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
 });
+
+const homeUrl = "https://acme.example/";
+const resourceUrl = "https://acme.example/blog/guide";
+const usefulHtml = `<main><h1>Acme product for business teams</h1><p>We provide workflow software and technical documentation for business operations.</p><a href="${targetUrl}">Product documentation</a><a href="${resourceUrl}">Resource guide</a></main>`;
+
+test("native review retains healthy first-party offer/resource pages within three GETs and one timeout", async () => {
+  const request = vi
+    .fn()
+    .mockResolvedValueOnce(page(homeUrl, 200, usefulHtml))
+    .mockResolvedValueOnce(page(targetUrl, 200, usefulHtml))
+    .mockResolvedValueOnce(page(resourceUrl, 200, usefulHtml));
+  vi.stubGlobal("fetch", request);
+  const review = await reviewOfficialSitePages(args);
+  expect(review.reviewedPages.map(({ url }) => url)).toEqual([
+    homeUrl,
+    targetUrl,
+    resourceUrl,
+  ]);
+  expect(review.reviewedPages[1]).toMatchObject({
+    url: targetUrl,
+    finalUrl: targetUrl,
+    httpStatus: 200,
+    provenance: "native_http",
+    text: expect.stringContaining("workflow software"),
+  });
+  expect(review.reviewedPages[1]).not.toHaveProperty("publishedAt");
+  expect(review).toMatchObject({ siteProblems: [], retryable: false });
+  expect(request).toHaveBeenCalledTimes(3);
+  expect(
+    request.mock.calls.every(([, options]) => options.redirect === "manual")
+  ).toBe(true);
+  expect(request.mock.calls[0][1].signal).toBe(request.mock.calls[2][1].signal);
+});
+
+test("native review reuses its source GET when confirming one real missing commercial page", async () => {
+  const request = vi
+    .fn()
+    .mockResolvedValueOnce(page(homeUrl, 200, usefulHtml))
+    .mockResolvedValueOnce(page(targetUrl, 404))
+    .mockResolvedValueOnce(page(targetUrl, 404));
+  vi.stubGlobal("fetch", request);
+  const review = await reviewOfficialSitePages(args);
+  expect(review.reviewedPages).toHaveLength(1);
+  expect(review.siteProblems).toEqual([
+    expect.objectContaining({ url: homeUrl, targetUrl, httpStatus: 404 }),
+  ]);
+  expect(request).toHaveBeenCalledTimes(3);
+});
+
+test("reviewed title and content never come from markup inside scripts or attributes", async () => {
+  const html = `<html><head><script>const example='<title>Fake title</title>';</script><title>Real &amp; useful offer</title></head><body><div title='<main>Fake main</main><title>Another fake title</title>'></div><main>Acme provides real business software and first-party operating documentation for professional teams.</main></body></html>`;
+  vi.stubGlobal(
+    "fetch",
+    vi.fn().mockResolvedValueOnce(page(homeUrl, 200, html))
+  );
+  const review = await reviewOfficialSitePages(args);
+  expect(review.reviewedPages[0]).toMatchObject({
+    title: "Real & useful offer",
+    text: "Acme provides real business software and first-party operating documentation for professional teams.",
+  });
+  expect(review.reviewedPages[0].text).not.toContain("Fake");
+});
+
+test("a last-request 404 is unconfirmed and never labeled a site problem", async () => {
+  vi.stubGlobal(
+    "fetch",
+    vi
+      .fn()
+      .mockResolvedValueOnce(page(homeUrl, 200, usefulHtml))
+      .mockResolvedValueOnce(page(targetUrl, 200, usefulHtml))
+      .mockResolvedValueOnce(page(resourceUrl, 404))
+  );
+  const review = await reviewOfficialSitePages(args);
+  expect(review.reviewedPages).toHaveLength(2);
+  expect(review.siteProblems).toEqual([]);
+});
+
+test("native review retains the verified source when a secondary page fails, without following private redirects", async () => {
+  const request = vi
+    .fn()
+    .mockResolvedValueOnce(page(homeUrl, 200, usefulHtml))
+    .mockResolvedValueOnce(
+      page(targetUrl, 302, "", { location: "http://127.0.0.1/private" })
+    )
+    .mockResolvedValueOnce(page(resourceUrl, 503));
+  vi.stubGlobal("fetch", request);
+  const review = await reviewOfficialSitePages(args);
+  expect(review.reviewedPages).toHaveLength(1);
+  expect(review).toMatchObject({ siteProblems: [], retryable: true });
+  expect(request.mock.calls.map(([url]) => url)).toEqual([
+    homeUrl,
+    targetUrl,
+    resourceUrl,
+  ]);
+});
+
+test.each([
+  {
+    status: 200,
+    html: "<main><h1>Page not found</h1><p>This requested page does not exist. Please go back to the homepage.</p></main>",
+    retryable: false,
+  },
+  { status: 503, html: "<h1>Service unavailable</h1>", retryable: true },
+  {
+    status: 200,
+    html: `<script>const template='${usefulHtml}';</script>`,
+    retryable: false,
+  },
+  {
+    status: 200,
+    html: `<main>Sign in to access this page</main>${usefulHtml}`,
+    retryable: false,
+  },
+])(
+  "native review never turns an error, script or access screen into a healthy page: %j",
+  async ({ status, html, retryable }) => {
+    const request = vi.fn().mockResolvedValueOnce(page(homeUrl, status, html));
+    vi.stubGlobal("fetch", request);
+    expect(await reviewOfficialSitePages(args)).toMatchObject({
+      reviewedPages: [],
+      siteProblems: [],
+      retryable,
+    });
+    expect(request).toHaveBeenCalledTimes(1);
+  }
+);
 
 test.each([404, 410])(
   "records only a live official link confirmed HTTP %s twice",
@@ -116,6 +243,7 @@ test.each([
   '<a href="/docs/product" href="/docs/live">Ambiguous documentation</a>',
   '<a href="/docs/product"><svg><title>Logo</title></svg></a>',
   '<a href="/products/logo"><svg><title>Logo</title></svg></a>',
+  "<div title='<a href=\"/docs/product\">Documentation</a>'></div>",
   '<a href="/products/logo">Logo</a>',
   '<a href="/docs/%5ccheckout/services/x">Buy product</a>',
   '<a href="/checkout;session/services/x">Buy product</a>',

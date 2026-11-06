@@ -8,7 +8,10 @@ import { getLearningTargetingFingerprint } from "./lib/learningTargetingHelpers"
 import { getWorkspaceIcpRefreshFingerprint } from "./lib/workspaceIcpSignalsCore";
 import { WORKSPACE_REPORTING_AGGREGATE_VERSION } from "./lib/workspaceReportingAggregate";
 import { qualifyProspectCore } from "./lib/qualificationCore";
-import { buildLegacyWorkspaceTargetingSpec } from "./lib/targetingSpecCore";
+import {
+  buildLegacyWorkspaceTargetingSpec,
+  preserveRequiredProblemCriterion,
+} from "./lib/targetingSpecCore";
 
 const modules = import.meta.glob("./**/*.ts");
 
@@ -77,6 +80,66 @@ async function seedWorkspace(t: ReturnType<typeof convexTest>, suffix: string) {
 }
 
 describe("workspace targeting persistence", () => {
+  test("switching a strict workspace to peer-or-audit survives a normal settings edit and targeting regeneration", async () => {
+    const t = convexTest(schema, modules);
+    const { userId, workosUserId, workspaceId } = await seedWorkspace(
+      t,
+      "peer-mode"
+    );
+    const profiles = [generatedProfile("Document management buyers")];
+    const base = buildLegacyWorkspaceTargetingSpec({
+      description: "French business offers",
+      profiles,
+    });
+    const original = {
+      ...base,
+      criteria: [
+        {
+          ...base.criteria[0],
+          id: "need",
+          kind: "required" as const,
+          category: "intent" as const,
+          evidence: "either" as const,
+          requiresProblemEvidence: true as const,
+        },
+      ],
+    };
+    await t.run((ctx) =>
+      ctx.db.patch(workspaceId, { targetingSpec: original })
+    );
+    const v3 = {
+      ...base,
+      discoveryMode: "peer_or_site_audit" as const,
+      searchHints: {
+        ...base.searchHints,
+        peerOfferPhrases: ["legal document workflow software"],
+        excludedCompanyDomains: ["existing-client.example"],
+      },
+    };
+    await t.mutation(
+      internal.workspaces.applyRegeneratedWorkspaceTargetingInternal,
+      {
+        workspaceId,
+        userId,
+        name: "Peers",
+        rawUserDescription: base.summary,
+        improvedDescription: base.summary,
+        icps: profiles,
+        targetingSpec: v3,
+        useCaseKey: "customer_prospecting",
+      }
+    );
+    const authenticated = t.withIdentity({ subject: workosUserId });
+    await authenticated.mutation(api.workspaces.updateWorkspaceSettings, {
+      workspaceId,
+      name: "Peers in France",
+    });
+    const saved = (await t.run((ctx) => ctx.db.get(workspaceId)))
+      ?.targetingSpec;
+    expect(saved).toEqual(v3);
+    expect(preserveRequiredProblemCriterion(base, saved)).toEqual(v3);
+  });
+
   test("marks edited generated profiles as manual", async () => {
     const t = convexTest(schema, modules);
     const { workosUserId, workspaceId } = await seedWorkspace(t, "manual-edit");

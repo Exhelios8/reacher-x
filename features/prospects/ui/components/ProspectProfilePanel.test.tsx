@@ -285,3 +285,52 @@ it("shows independent site checks without publication or personal post actions",
   captured.details.onQualificationSourcesClick?.();
   expect(onOpenEvidencePosts.mock.lastCall?.[0].posts).toHaveLength(1);
 });
+
+it("shows a documented exploration with unknown need without claiming intent", () => {
+  const prospect = normalizeProspectProfileData({
+    _id: "v3",
+    platform: "linkedin",
+    qualificationVerification: {
+      routeAssessment: {
+        route: "exploration",
+        sourceUrl: "https://example.com/offer",
+        sourceQuote: "Training inter and intra",
+        rationale: "Public offer read",
+        offerOrRemedy: "Test a choice guide",
+        needStatus: "unknown",
+      },
+    },
+  });
+  expect(prospect?.routeAssessment?.sourceUrl).toBe(
+    "https://example.com/offer"
+  );
+  const html = renderToStaticMarkup(
+    <ProspectProfilePanel prospect={prospect!} />
+  );
+  expect(html).toContain("Exploration");
+  expect(html).toContain("Need: unknown");
+  expect(html).toContain("Purchase intent is not established");
+  expect(html).toContain("Training inter and intra");
+  expect(html).toContain("Test a choice guide");
+});
+
+it("labels research-only contact verification and hides unsafe route links", () => {
+  const prospect = normalizeProspectProfileData({
+    _id: "unverified-v3",
+    qualificationVerification: {
+      routeAssessment: {
+        route: "none",
+        sourceUrl: "javascript:alert(1)",
+        rationale: "Buyer identity not verified",
+        needStatus: "unknown",
+        needsContactVerification: true,
+      },
+    },
+  });
+  expect(prospect?.routeAssessment?.sourceUrl).toBeUndefined();
+  const html = renderToStaticMarkup(
+    <ProspectProfilePanel prospect={prospect!} />
+  );
+  expect(html).toContain("Contact/employer to verify");
+  expect(html).not.toContain("javascript:");
+});
