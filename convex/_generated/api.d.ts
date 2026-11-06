@@ -174,6 +174,7 @@ import type * as lib_outreachReadinessCore from "../lib/outreachReadinessCore.js
 import type * as lib_outreachRecoveryCore from "../lib/outreachRecoveryCore.js";
 import type * as lib_outreachResultCore from "../lib/outreachResultCore.js";
 import type * as lib_patchHelpers from "../lib/patchHelpers.js";
+import type * as lib_peerQualificationCore from "../lib/peerQualificationCore.js";
 import type * as lib_planBatchAgentContinuation from "../lib/planBatchAgentContinuation.js";
 import type * as lib_planBatchCore from "../lib/planBatchCore.js";
 import type * as lib_planBatchWorkPool from "../lib/planBatchWorkPool.js";
@@ -583,6 +584,7 @@ declare const fullApi: ApiFromModules<{
   "lib/outreachRecoveryCore": typeof lib_outreachRecoveryCore;
   "lib/outreachResultCore": typeof lib_outreachResultCore;
   "lib/patchHelpers": typeof lib_patchHelpers;
+  "lib/peerQualificationCore": typeof lib_peerQualificationCore;
   "lib/planBatchAgentContinuation": typeof lib_planBatchAgentContinuation;
   "lib/planBatchCore": typeof lib_planBatchCore;
   "lib/planBatchWorkPool": typeof lib_planBatchWorkPool;
