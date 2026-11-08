@@ -133,6 +133,7 @@ import type * as lib_discoveryEdgesCore from "../lib/discoveryEdgesCore.js";
 import type * as lib_discoveryQueryPlanningCore from "../lib/discoveryQueryPlanningCore.js";
 import type * as lib_disqualificationOutreachCore from "../lib/disqualificationOutreachCore.js";
 import type * as lib_embeddingModels from "../lib/embeddingModels.js";
+import type * as lib_employeeRangeCore from "../lib/employeeRangeCore.js";
 import type * as lib_enrichmentCore from "../lib/enrichmentCore.js";
 import type * as lib_enrichmentPool from "../lib/enrichmentPool.js";
 import type * as lib_errorHelpers from "../lib/errorHelpers.js";
@@ -543,6 +544,7 @@ declare const fullApi: ApiFromModules<{
   "lib/discoveryQueryPlanningCore": typeof lib_discoveryQueryPlanningCore;
   "lib/disqualificationOutreachCore": typeof lib_disqualificationOutreachCore;
   "lib/embeddingModels": typeof lib_embeddingModels;
+  "lib/employeeRangeCore": typeof lib_employeeRangeCore;
   "lib/enrichmentCore": typeof lib_enrichmentCore;
   "lib/enrichmentPool": typeof lib_enrichmentPool;
   "lib/errorHelpers": typeof lib_errorHelpers;
