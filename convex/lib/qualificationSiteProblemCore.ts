@@ -306,14 +306,13 @@ export async function reviewOfficialSitePages(args: {
     siteProblems: [],
     retryable: false,
   };
-  const sourceUrl = safeOfficialUrl(args.officialWebsite, args.officialWebsite);
-  if (!sourceUrl || !/^[1-9]\d*$/.test(args.companyId)) return result;
+  const entryUrl = safeOfficialUrl(args.officialWebsite, args.officialWebsite);
+  if (!entryUrl || !/^[1-9]\d*$/.test(args.companyId)) return result;
   const signal = AbortSignal.timeout(8_000);
   let calls = 0;
-  const get = async (url: string) => {
-    if (calls >= 3) return undefined;
+  const request = (url: string) => {
     calls++;
-    const response = await fetch(url, {
+    return fetch(url, {
       method: "GET",
       redirect: "manual",
       credentials: "omit",
@@ -324,6 +323,23 @@ export async function reviewOfficialSitePages(args: {
         "User-Agent": "ReacherX/1.0",
       },
     });
+  };
+  const get = async (url: string) => {
+    if (calls >= 3) return undefined;
+    let response = await request(url);
+    // Company profiles often list HTTP. Accept only a scheme upgrade of the exact entry URL.
+    const secureEntry = url.replace(/^http:/, "https:");
+    if (
+      url === entryUrl &&
+      secureEntry !== url &&
+      calls < 3 &&
+      [301, 302, 307, 308].includes(response.status) &&
+      response.headers.get("location") === secureEntry
+    ) {
+      await response.body?.cancel();
+      url = secureEntry;
+      response = await request(url);
+    }
     const html = await readBoundedBody(response, 128 * 1024);
     if (html === undefined || hasExplicitAccessBarrier(response, html))
       return undefined;
@@ -368,8 +384,9 @@ export async function reviewOfficialSitePages(args: {
     return true;
   };
   try {
-    const source = await get(sourceUrl);
+    const source = await get(entryUrl);
     if (!source || !retain(source)) return result;
+    const sourceUrl = source.response.url;
     const visited = [sourceUrl];
     while (calls < 3) {
       const link = selectLinkedPage(

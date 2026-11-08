@@ -7,6 +7,11 @@ import { internalAction } from "../../lib/functionBuilders";
 import { v } from "convex/values";
 import { logger } from "../../../shared/lib/logger";
 import { requestLinkdApiData } from "./linkdapiClient";
+import {
+  isVerifiedAccountCompany,
+  matchesAccountCompanyName,
+} from "../../lib/accountFirstDiscoveryCore";
+import { isRecord } from "../../lib/typeGuards";
 const linkedInCompanyLogger = logger.withScope("LinkedInGetCompany");
 
 // ============================================================================
@@ -80,6 +85,7 @@ export interface CompanyResult {
   success: boolean;
   company?: LinkedInCompany;
   error?: string;
+  retryable?: boolean;
 }
 
 // ============================================================================
@@ -97,6 +103,7 @@ export const getCompany = internalAction({
   args: {
     id: v.optional(v.string()),
     name: v.optional(v.string()),
+    sourceUrl: v.optional(v.string()),
   },
   handler: async (ctx, args): Promise<CompanyResult> => {
     if (!args.id && !args.name) {
@@ -107,14 +114,68 @@ export const getCompany = internalAction({
     }
 
     try {
+      let companyId = args.id;
+      if (args.sourceUrl) {
+        if (!args.name?.trim())
+          return {
+            success: false,
+            error: "Company name is required to verify the official source",
+          };
+        // Human names are autocomplete queries, never guessed LinkedIn slugs.
+        const lookup = await requestLinkdApiData<unknown>(ctx, {
+          path: "/api/v1/companies/name-lookup",
+          query: { query: args.name },
+          consumer: `linkedin.resolveCompany:${args.name}`,
+        });
+        const candidates =
+          isRecord(lookup) && Array.isArray(lookup.companies)
+            ? lookup.companies.flatMap((item) => {
+                if (
+                  !isRecord(item) ||
+                  typeof item.displayName !== "string" ||
+                  (typeof item.id !== "string" && typeof item.id !== "number")
+                )
+                  return [];
+                const id = String(item.id);
+                return /^\d+$/.test(id) &&
+                  matchesAccountCompanyName(
+                    args.name!,
+                    item.displayName,
+                    args.sourceUrl!
+                  )
+                  ? [{ id }]
+                  : [];
+              })
+            : [];
+        if (candidates.length !== 1)
+          return {
+            success: false,
+            error: "Company identity is missing or ambiguous",
+          };
+        companyId = candidates[0].id;
+      }
       const company = await requestLinkdApiData<LinkedInCompany>(ctx, {
         path: "/api/v1/companies/company/info",
         query: {
-          id: args.id,
-          name: args.name,
+          id: companyId,
+          name: args.sourceUrl ? undefined : args.name,
         },
         consumer: `linkedin.getCompany:${args.id ?? args.name ?? "unknown"}`,
       });
+
+      if (args.sourceUrl) company.id = String(company.id);
+      if (
+        args.sourceUrl &&
+        (company.id !== companyId ||
+          !isVerifiedAccountCompany(
+            { name: args.name!, sourceUrl: args.sourceUrl },
+            company
+          ))
+      )
+        return {
+          success: false,
+          error: "Company identity does not match the official source",
+        };
 
       return {
         success: true,
@@ -131,6 +192,7 @@ export const getCompany = internalAction({
       return {
         success: false,
         error: errorMessage,
+        ...(args.sourceUrl ? { retryable: true } : {}),
       };
     }
   },

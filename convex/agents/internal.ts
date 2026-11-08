@@ -1108,6 +1108,7 @@ When Twitter is requested:
 
 When LinkedIn is requested:
 - generate linkedinPostQueries as short professional/topic phrases
+- For named account research, use exactly the source publisher's company name + one supplied role title, with no geography, skill or other suffix. Do not turn a product, parent group or division into a different employer; an unresolved identity will be skipped. Never guess a LinkedIn company ID or slug.
 ${isAccountFirstDiscoveryEnabled(args.workspaceId) && args.targetingSpec?.searchHints.activityPhrases?.length ? `- For this account-first research path, choose short standalone linkedinPostQueries verbatim from these supplied work/page topics; no job title or extra AND constraints: ${JSON.stringify(args.targetingSpec.searchHints.activityPhrases)}. These are retrieval phrases, not proof of a project or buying intent.` : ""}
 - ${
       includeLinkedInPeople

@@ -2,6 +2,8 @@ import { notifyWorkspacePlanLimitReached } from "../lib/planLimitNotificationCor
 import {
   isAccountFirstDiscoveryEnabled,
   isFreshAccountResearchHint,
+  parseAccountPeopleQuery,
+  isVerifiedAccountCompany,
 } from "../lib/accountFirstDiscoveryCore";
 import { getLearningTargetingFingerprint } from "../lib/learningTargetingHelpers";
 // convex/workflows/prospecting.ts
@@ -54,7 +56,10 @@ import type {
   TwitterUser,
 } from "../integrations/twitter/searchPosts";
 import type { LinkedInPost } from "../integrations/linkedin/searchPosts";
-import type { LinkedInPerson } from "../integrations/linkedin/searchPeople";
+import type {
+  LinkedInPerson,
+  LinkedInPeopleBatchSearchResult,
+} from "../integrations/linkedin/searchPeople";
 import {
   prospectingBootstrapCompletionReasonValidator,
   prospectingCycleStatusValidator,
@@ -766,11 +771,13 @@ export const prospectingWorkflow = workflow.define({
                     postsFound: number;
                     success: boolean;
                     error?: string;
+                    skipped?: boolean;
                   }) => ({
                     query: item.query,
                     postsFound: item.postsFound,
                     success: item.success,
                     error: item.error,
+                    skipped: item.skipped,
                   })
                 ),
               });
@@ -1462,6 +1469,7 @@ export const searchLinkedInInternal = internalAction({
       postsFound: number;
       success: boolean;
       error?: string;
+      skipped?: boolean;
     }>;
   }> => {
     const accountFirst = isAccountFirstDiscoveryEnabled(args.workspaceId);
@@ -1516,6 +1524,9 @@ export const searchLinkedInInternal = internalAction({
       throw new Error("Workspace not found");
     }
 
+    let accountPeopleQueries:
+      | Array<{ value: string; source?: string }>
+      | undefined;
     if (accountFirst) {
       const [postQueue, peopleQueue] = await Promise.all([
         ctx.runQuery(internal.keywords.getPrioritizedLinkedInQueries, {
@@ -1536,12 +1547,131 @@ export const searchLinkedInInternal = internalAction({
         postQueries: postQueue.map((query) => query.value),
         peopleQueries: peopleQueue.map((query) => query.value),
       };
+      if (workspace.targetingSpec?.discoveryMode === "peer_or_site_audit")
+        accountPeopleQueries = peopleQueue;
     }
 
     const filters =
       args.applyProviderFilters === false && !accountFirst
         ? undefined
         : workspace.targetingSpec?.searchFilters;
+
+    const searchPeople = async () => {
+      const search = (queries: string[], currentCompany?: string) =>
+        ctx.runAction(api.integrations.linkedin.searchPeople.searchBatch, {
+          queries,
+          count: accountFirst
+            ? LINKEDIN_ACCOUNT_FIRST_LIMITS.peoplePerQuery
+            : LINKEDIN_PEOPLE_DEFAULT_COUNT,
+          location: filters?.linkedinPeople.location,
+          profileLanguage: filters?.linkedinPeople.profileLanguage,
+          maxQueriesPerBatch: 10,
+          ...(accountFirst ? { accountFirstDiscovery: true } : {}),
+          ...(currentCompany ? { currentCompany } : {}),
+        });
+      if (!accountPeopleQueries) return search(args.peopleQueries);
+      const results = await Promise.all(
+        accountPeopleQueries.map(async ({ value, source }) => {
+          try {
+            const account = parseAccountPeopleQuery(
+              value,
+              source,
+              workspace.targetingSpec?.searchHints.roleTitles ?? [],
+              getCurrentUTCTimestamp()
+            );
+            const resolved = account
+              ? await ctx.runAction(
+                  internal.integrations.linkedin.getCompany.getCompany,
+                  { name: account.name, sourceUrl: account.sourceUrl }
+                )
+              : null;
+            if (
+              !account ||
+              !resolved?.success ||
+              !resolved.company ||
+              !isVerifiedAccountCompany(account, resolved.company)
+            ) {
+              const retryable = resolved?.retryable === true;
+              const error = retryable
+                ? "LinkedIn company verification is temporarily unavailable"
+                : "Skipped: LinkedIn company identity could not be verified against the official source";
+              return {
+                success: !retryable,
+                people: [] as LinkedInPerson[],
+                matchedQueriesByPersonUrn: {} as Record<string, string[]>,
+                errors: retryable ? [{ query: value, error }] : [],
+                queryStats: [
+                  {
+                    query: value,
+                    peopleFound: 0,
+                    success: false,
+                    searchMode: "title" as const,
+                    skipped: !retryable,
+                    error,
+                  },
+                ],
+              };
+            }
+            const result = await search([account.title], resolved.company.id);
+            return {
+              ...result,
+              queryStats: result.queryStats.map((item) => ({
+                ...item,
+                query: value,
+              })),
+              matchedQueriesByPersonUrn: Object.fromEntries(
+                Object.keys(result.matchedQueriesByPersonUrn).map((urn) => [
+                  urn,
+                  [value],
+                ])
+              ),
+            };
+          } catch (error) {
+            const message = sanitizeWorkflowString(
+              stringifyUnknownError(error)
+            );
+            return {
+              success: false,
+              people: [] as LinkedInPerson[],
+              matchedQueriesByPersonUrn: {} as Record<string, string[]>,
+              errors: [{ query: value, error: message }],
+              queryStats: [
+                {
+                  query: value,
+                  peopleFound: 0,
+                  success: false,
+                  searchMode: "title" as const,
+                  error: message,
+                },
+              ],
+            };
+          }
+        })
+      );
+      return {
+        success: results.every((result) => result.success),
+        people: results.flatMap((result) => result.people),
+        matchedQueriesByPersonUrn: results.reduce<Record<string, string[]>>(
+          (all, result) => {
+            for (const [urn, queries] of Object.entries(
+              result.matchedQueriesByPersonUrn
+            ))
+              all[urn] = [...new Set([...(all[urn] ?? []), ...queries])];
+            return all;
+          },
+          {}
+        ),
+        errors: results.flatMap((result) => result.errors),
+        queryStats: results.flatMap((result) => result.queryStats),
+      } satisfies Pick<
+        LinkedInPeopleBatchSearchResult,
+        | "success"
+        | "people"
+        | "matchedQueriesByPersonUrn"
+        | "errors"
+        | "queryStats"
+      >;
+    };
 
     const [postSettlement, peopleSettlement] = await Promise.allSettled([
       args.postQueries.length > 0
@@ -1559,18 +1689,7 @@ export const searchLinkedInInternal = internalAction({
             ...(accountFirst ? { accountFirstDiscovery: true } : {}),
           })
         : Promise.resolve(null),
-      args.peopleQueries.length > 0
-        ? ctx.runAction(api.integrations.linkedin.searchPeople.searchBatch, {
-            queries: args.peopleQueries,
-            count: accountFirst
-              ? LINKEDIN_ACCOUNT_FIRST_LIMITS.peoplePerQuery
-              : LINKEDIN_PEOPLE_DEFAULT_COUNT,
-            location: filters?.linkedinPeople.location,
-            profileLanguage: filters?.linkedinPeople.profileLanguage,
-            maxQueriesPerBatch: 10,
-            ...(accountFirst ? { accountFirstDiscovery: true } : {}),
-          })
-        : Promise.resolve(null),
+      args.peopleQueries.length > 0 ? searchPeople() : Promise.resolve(null),
     ]);
     const postResult =
       postSettlement.status === "fulfilled" ? postSettlement.value : null;
@@ -1826,6 +1945,7 @@ export const searchLinkedInInternal = internalAction({
       query: sanitizeWorkflowString(item.query),
       postsFound: item.peopleFound,
       success: peoplePersistenceError ? false : item.success,
+      skipped: "skipped" in item ? item.skipped : undefined,
       error:
         peoplePersistenceError ??
         (item.error ? sanitizeWorkflowString(item.error) : undefined),

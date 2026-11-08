@@ -176,6 +176,83 @@ function normalizeName(value: string): string {
     .replace(/[^a-z0-9]/g, "");
 }
 
+export function isUnsearchedAccountResearchHint(
+  source: string | undefined,
+  lastSearchedAt: number | undefined
+): boolean {
+  const timestamp = Number(source?.split(":")[1]?.split("|")[0]);
+  return (
+    Number.isFinite(timestamp) &&
+    (lastSearchedAt === undefined || lastSearchedAt < timestamp)
+  );
+}
+
+export function parseAccountPeopleQuery(
+  query: string,
+  source: string | undefined,
+  roleTitles: readonly string[],
+  now: number
+): { name: string; title: string; sourceUrl: string } | null {
+  if (!isFreshAccountResearchHint(source, now)) return null;
+  const normalized = query.trim().replace(/\s+/g, " ");
+  const title = [...roleTitles]
+    .sort((a, b) => b.length - a.length)
+    .find((role) =>
+      normalized.toLowerCase().endsWith(` ${role.toLowerCase()}`)
+    );
+  if (!title) return null;
+  const name = normalized.slice(0, -title.length).trim();
+  return name ? { name, title, sourceUrl: source!.split("|")[1] } : null;
+}
+
+export function matchesAccountCompanyName(
+  accountName: string,
+  companyName: string,
+  sourceUrl: string
+): boolean {
+  if (normalizeName(accountName) === normalizeName(companyName)) return true;
+  try {
+    const brand = normalizeName(accountName);
+    const words = companyName.trim().split(/\s+/);
+    // A distinctive official host brand can omit a preceding personal name, never a division suffix or short acronym.
+    return (
+      brand.length >= 5 &&
+      !/\s/.test(accountName.trim()) &&
+      normalizeName(
+        new URL(sourceUrl).hostname.replace(/^www\./, "").split(".")[0]
+      ) === brand &&
+      words.length === 2 &&
+      normalizeName(words[1]) === brand &&
+      !/^(group|groupe|holding|holdings)$/i.test(words[0])
+    );
+  } catch {
+    return false;
+  }
+}
+
+export function isVerifiedAccountCompany(
+  account: { name: string; sourceUrl: string },
+  company: { id: string; name: string; website: string }
+): boolean {
+  try {
+    const source = new URL(account.sourceUrl);
+    const website = new URL(company.website);
+    return (
+      /^\d+$/.test(company.id) &&
+      matchesAccountCompanyName(
+        account.name,
+        company.name,
+        account.sourceUrl
+      ) &&
+      /^https?:$/.test(website.protocol) &&
+      source.hostname.replace(/^www\./, "") ===
+        website.hostname.replace(/^www\./, "")
+    );
+  } catch {
+    return false;
+  }
+}
+
 /** Research provenance only: the qualifier still verifies employer, geography and event. */
 export function groundAccountQuery<
   T extends { query: string; accountName?: string; accountSourceUrl?: string },
@@ -193,6 +270,9 @@ export function groundAccountQuery<
     targetingSpec?.discoveryMode === "peer_or_site_audit"
       ? targetingSpec.searchHints.roleTitles.map(normalizeName).filter(Boolean)
       : [];
+  const canonicalRole = targetingSpec?.searchHints.roleTitles.find(
+    (role) => normalizeName(item.query) === normalizeName(`${name} ${role}`)
+  );
   if (
     !finding ||
     (finding.retrievedAt &&
@@ -203,8 +283,7 @@ export function groundAccountQuery<
         targetingSpec.searchHints.excludedCompanyDomains
       )) ||
     !sourceKeyword ||
-    (allowedRoles.length > 0 &&
-      !allowedRoles.some((role) => normalizeName(item.query).includes(role))) ||
+    (allowedRoles.length > 0 && !canonicalRole) ||
     !name ||
     normalizeName(item.query) === normalizeName(name) ||
     !normalizeName(item.query).includes(normalizeName(name)) ||
@@ -231,6 +310,7 @@ export function groundAccountQuery<
   if (!nameTokens.some((token) => host.includes(token))) return null;
   return {
     ...item,
+    ...(allowedRoles.length > 0 ? { query: `${name} ${canonicalRole}` } : {}),
     sourceKeyword,
   };
 }

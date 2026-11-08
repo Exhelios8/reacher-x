@@ -7,6 +7,9 @@ import {
   isAccountResearchHintFromFindings,
   isFreshAccountResearchHint,
   selectRecentAccountFindings,
+  parseAccountPeopleQuery,
+  isVerifiedAccountCompany,
+  isUnsearchedAccountResearchHint,
 } from "./accountFirstDiscoveryCore";
 import { buildLegacyWorkspaceTargetingSpec } from "./targetingSpecCore";
 
@@ -17,6 +20,86 @@ const finding = {
   publishedDate: "2026-11-01",
   snippet: "Acme annonce une nouvelle usine en France.",
 };
+
+test("account binding requires an exact named employer, allowed role, and official domain", () => {
+  const source = `account_retrieval_hint:${now}|https://agent-factory.fr/offre`;
+  const account = parseAccountPeopleQuery(
+    "Agent Factory fondateur",
+    source,
+    ["fondateur"],
+    now
+  )!;
+  expect(account).toEqual({
+    name: "Agent Factory",
+    title: "fondateur",
+    sourceUrl: "https://agent-factory.fr/offre",
+  });
+  expect(
+    parseAccountPeopleQuery("fondateur", source, ["fondateur"], now)
+  ).toBeNull();
+  expect(
+    parseAccountPeopleQuery(
+      "Agent Factory stagiaire",
+      source,
+      ["fondateur"],
+      now
+    )
+  ).toBeNull();
+  expect(
+    isVerifiedAccountCompany(account, {
+      id: "123",
+      name: "Agent Factory",
+      website: "https://www.agent-factory.fr",
+    })
+  ).toBe(true);
+  expect(
+    isVerifiedAccountCompany(account, {
+      id: "123",
+      name: "Agent Factory",
+      website: "https://agent-factory.com",
+    })
+  ).toBe(false);
+  expect(
+    isVerifiedAccountCompany(
+      { ...account, name: "Group" },
+      { id: "123", name: "Group Division", website: account.sourceUrl }
+    )
+  ).toBe(false);
+  expect(isUnsearchedAccountResearchHint(source, now - 1)).toBe(true);
+  expect(isUnsearchedAccountResearchHint(source, now)).toBe(false);
+});
+
+test("planner acceptance emits the same exact company-role form execution can parse", () => {
+  const spec = buildLegacyWorkspaceTargetingSpec({
+    description: "France",
+    profiles: [],
+  });
+  spec.discoveryMode = "peer_or_site_audit";
+  spec.searchHints.roleTitles = ["directeur marketing"];
+  const offer = { ...finding, retrievedAt: new Date(now).toISOString() };
+  const input = {
+    query: "ACME directeur marketing",
+    accountName: "Acme",
+    accountSourceUrl: offer.url,
+  };
+  const grounded = groundAccountQuery(input, [offer], spec)!;
+  expect(grounded.query).toBe("Acme directeur marketing");
+  expect(
+    parseAccountPeopleQuery(
+      grounded.query,
+      grounded.sourceKeyword,
+      spec.searchHints.roleTitles,
+      now
+    )
+  ).toMatchObject({ name: "Acme", title: "directeur marketing" });
+  expect(
+    groundAccountQuery(
+      { ...input, query: "Acme directeur marketing France" },
+      [offer],
+      spec
+    )
+  ).toBeNull();
+});
 afterEach(() => vi.unstubAllEnvs());
 
 test("account lookups rotate compact supplied work topics in the target language", () => {

@@ -2,6 +2,7 @@ import { getWorkspaceIcpRefreshFingerprint } from "./lib/workspaceIcpSignalsCore
 import {
   isAccountFirstDiscoveryEnabled,
   isFreshAccountResearchHint,
+  isUnsearchedAccountResearchHint,
 } from "./lib/accountFirstDiscoveryCore";
 import {
   getLearningTargetingFingerprint,
@@ -156,6 +157,7 @@ async function getPrioritizedSocialQueries(
     priority: QueryPriority;
     searchMode?: TwitterProspectingSearchMode;
     discoveryStage?: "strict" | "balanced" | "broad";
+    source?: string;
   }>
 > {
   const workspace = await ctx.db.get(args.workspaceId);
@@ -193,6 +195,9 @@ async function getPrioritizedSocialQueries(
       String(keyword._id),
       keyword.twitterLastSeenPostId,
     ])
+  );
+  const sourceByQueryId = new Map(
+    keywords.map((keyword) => [String(keyword._id), keyword.source])
   );
   const accountFirstLinkedIn =
     args.platform === "linkedin" &&
@@ -232,7 +237,12 @@ async function getPrioritizedSocialQueries(
               workspace.targetingSpec?.discoveryMode === "peer_or_site_audit"
                 ? workspace.targetingSpec.searchHints.excludedCompanyDomains
                 : undefined
-            )
+            ) &&
+            (workspace.targetingSpec?.discoveryMode !== "peer_or_site_audit" ||
+              isUnsearchedAccountResearchHint(
+                keyword.source,
+                keyword.lastSearchedLinkedInAt
+              ))
           : keyword.queryStyle !== "role_title" &&
             (!workPhrases.length ||
               workPhrases.some((phrase) =>
@@ -297,6 +307,7 @@ async function getPrioritizedSocialQueries(
         ? twitterSearchModeByQueryId.get(String(candidate.id))
         : undefined,
     discoveryStage: candidate.discoveryStage,
+    source: sourceByQueryId.get(String(candidate.id)),
   }));
 }
 
@@ -621,6 +632,7 @@ export const markQueriesAsSearched = internalMutation({
           pagesFetched: v.optional(v.number()),
           newestPostId: v.optional(v.string()),
           success: v.boolean(),
+          skipped: v.optional(v.boolean()),
           error: v.optional(v.string()),
         })
       )
@@ -666,6 +678,15 @@ export const markQueriesAsSearched = internalMutation({
           !perQueryStats
         )
           continue;
+        if (
+          args.platform === "linkedin" &&
+          args.surface === "people" &&
+          isAccountFirstDiscoveryEnabled(keyword.workspaceId) &&
+          workspace.targetingSpec?.discoveryMode === "peer_or_site_audit" &&
+          perQueryStats?.success === false &&
+          !perQueryStats.skipped
+        )
+          continue;
         if (args.platform === "twitter") {
           await ctx.db.patch(queryId, {
             lastSearchedTwitterAt: now,
@@ -680,32 +701,34 @@ export const markQueriesAsSearched = internalMutation({
         } else {
           await ctx.db.patch(queryId, {
             lastSearchedLinkedInAt: now,
-            linkedinResultsCount:
-              perQueryStats?.postsFound ??
-              args.resultsCount ??
-              keyword.linkedinResultsCount,
+            linkedinResultsCount: perQueryStats?.skipped
+              ? keyword.linkedinResultsCount
+              : (perQueryStats?.postsFound ??
+                args.resultsCount ??
+                keyword.linkedinResultsCount),
             lastUsedAt: now,
           });
         }
 
-        await upsertQueryPerformanceRecord(ctx.db, {
-          workspaceId: keyword.workspaceId,
-          queryId,
-          canonicalValue: canonical.canonicalValue,
-          canonicalHash: canonical.canonicalHash,
-          platform: args.platform,
-          surface:
-            args.platform === "twitter"
-              ? "posts"
-              : (args.surface ?? resolveKeywordLinkedInSurface(keyword)),
-          activatedQueryCandidateId: keyword.activatedQueryCandidateId,
-          impressionsDelta: 1,
-          prospectsFoundDelta:
-            perQueryStats?.newProspectsFound ??
-            perQueryStats?.postsFound ??
-            (args.queryIds.length === 1 ? (args.resultsCount ?? 0) : 0),
-          lastUsedAt: now,
-        });
+        if (!perQueryStats?.skipped)
+          await upsertQueryPerformanceRecord(ctx.db, {
+            workspaceId: keyword.workspaceId,
+            queryId,
+            canonicalValue: canonical.canonicalValue,
+            canonicalHash: canonical.canonicalHash,
+            platform: args.platform,
+            surface:
+              args.platform === "twitter"
+                ? "posts"
+                : (args.surface ?? resolveKeywordLinkedInSurface(keyword)),
+            activatedQueryCandidateId: keyword.activatedQueryCandidateId,
+            impressionsDelta: 1,
+            prospectsFoundDelta:
+              perQueryStats?.newProspectsFound ??
+              perQueryStats?.postsFound ??
+              (args.queryIds.length === 1 ? (args.resultsCount ?? 0) : 0),
+            lastUsedAt: now,
+          });
         await recordMemoryWorkflowEvent(ctx, {
           workspaceId: keyword.workspaceId,
           eventType: "query_search_executed",
@@ -720,6 +743,7 @@ export const markQueriesAsSearched = internalMutation({
                 ? (args.resultsCount ?? 0)
                 : undefined),
             searchSuccess: perQueryStats?.success,
+            searchSkipped: perQueryStats?.skipped,
             searchError: perQueryStats?.error,
             rawPostsFound: perQueryStats?.postsFound,
             newProspectsFound: perQueryStats?.newProspectsFound,

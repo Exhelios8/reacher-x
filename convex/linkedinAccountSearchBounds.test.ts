@@ -1,8 +1,11 @@
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import { getFunctionName, type FunctionArgs } from "convex/server";
 import type { ActionCtx } from "./_generated/server";
-import type { api } from "./_generated/api";
-import { searchBatch as peopleBatch } from "./integrations/linkedin/searchPeople";
+import type { api, internal } from "./_generated/api";
+import {
+  searchBatch as peopleBatch,
+  searchInternal,
+} from "./integrations/linkedin/searchPeople";
 import { searchBatch as postsBatch } from "./integrations/linkedin/searchPosts";
 import {
   getRetriedActionStatus,
@@ -114,6 +117,58 @@ test("unresolved requested geography never becomes a worldwide people query", as
     })
   ).rejects.toThrow("location");
   expect(runProviderActionRetried).not.toHaveBeenCalled();
+});
+
+test("a bound current-company search uses the title filter and never falls back", async () => {
+  await peopleHandler(ctx, {
+    queries: ["directeur marketing"],
+    currentCompany: "123",
+    location: "France",
+    accountFirstDiscovery: true,
+  });
+  expect(runProviderActionRetried).toHaveBeenCalledTimes(1);
+  expect(vi.mocked(runProviderActionRetried).mock.calls[0][2]).toMatchObject({
+    query: "directeur marketing",
+    searchMode: "title",
+    currentCompany: "123",
+    geoUrn: "france-geo",
+  });
+});
+
+test("the actual native transport sends separate company and role filters", async () => {
+  const handler = (
+    searchInternal as unknown as {
+      _handler: (
+        ctx: ActionCtx,
+        args: FunctionArgs<
+          typeof internal.integrations.linkedin.searchPeople.searchInternal
+        >
+      ) => Promise<unknown>;
+    }
+  )._handler;
+  vi.mocked(requestLinkdApiData).mockResolvedValueOnce({
+    people: [],
+    total: 0,
+    start: 0,
+    hasMore: false,
+  });
+  await handler(ctx, {
+    query: "marketing",
+    searchMode: "title",
+    currentCompany: "3475985",
+    count: 3,
+  });
+  expect(requestLinkdApiData).toHaveBeenCalledWith(
+    expect.anything(),
+    expect.objectContaining({
+      path: "/api/v1/search/people",
+      query: expect.objectContaining({
+        title: "marketing",
+        currentCompany: "3475985",
+        count: 3,
+      }),
+    })
+  );
 });
 
 test("an empty constrained account search is successful and never broadens", async () => {

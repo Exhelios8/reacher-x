@@ -108,13 +108,19 @@ describe("LinkedIn discovery stages at the provider boundary", () => {
   });
 });
 
-async function executeAccountFirst(peopleFail = false) {
+async function executeAccountFirst(
+  peopleFail = false,
+  companyWebsite = "https://acme.fr",
+  companyOutage = false
+) {
   vi.stubEnv("ACCOUNT_FIRST_DISCOVERY_WORKSPACE_IDS", "workspace");
   const calls: Array<{ name: string; args: Record<string, unknown> }> = [];
   const workspace = {
     userId: "test-user",
     name: "QA",
     targetingSpec: {
+      discoveryMode: "peer_or_site_audit",
+      searchHints: { roleTitles: ["directeur marketing"] },
       searchFilters: {
         linkedinPosts: { datePosted: "past-year" },
         linkedinPeople: { location: "France", profileLanguage: "fr" },
@@ -133,7 +139,12 @@ async function executeAccountFirst(peopleFail = false) {
               ? "Acme directeur marketing"
               : "refonte site";
           return (args.restrictToQueries as string[]).includes(eligible)
-            ? [{ value: eligible }]
+            ? [
+                {
+                  value: eligible,
+                  source: `account_retrieval_hint:${Date.now()}|https://acme.fr/offre`,
+                },
+              ]
             : [];
         }
         return workspace;
@@ -145,6 +156,14 @@ async function executeAccountFirst(peopleFail = false) {
     ) => {
       const name = getFunctionName(ref);
       calls.push({ name, args });
+      if (name === "integrations/linkedin/getCompany:getCompany")
+        if (companyOutage)
+          return { success: false, retryable: true, error: "HTTP 503" };
+      if (name === "integrations/linkedin/getCompany:getCompany")
+        return {
+          success: true,
+          company: { id: "123", name: "Acme", website: companyWebsite },
+        };
       if (peopleFail && name.includes("searchPeople"))
         throw new Error("People provider unavailable");
       const queries = args.queries as string[];
@@ -177,11 +196,12 @@ async function executeAccountFirst(peopleFail = false) {
 test("account-first action rechecks named eligibility and preserves filters despite a relaxed flag", async () => {
   const { calls, result } = await executeAccountFirst();
   expect(result.success).toBe(true);
-  expect(calls).toHaveLength(2);
+  expect(calls).toHaveLength(3);
   const people = calls.find((call) => call.name.includes("searchPeople"))!;
   const posts = calls.find((call) => call.name.includes("searchPosts"))!;
   expect(people.args).toMatchObject({
-    queries: ["Acme directeur marketing"],
+    queries: ["directeur marketing"],
+    currentCompany: "123",
     count: 10,
     location: "France",
     profileLanguage: "fr",
@@ -195,6 +215,42 @@ test("account-first action rechecks named eligibility and preserves filters desp
   });
   expect(result.postQueryStats).toHaveLength(1);
   expect(result.peopleQueryStats).toHaveLength(1);
+  expect(result.peopleQueryStats[0].query).toBe("Acme directeur marketing");
+});
+
+test("an unverified or homonymous company is skipped without a broad people search", async () => {
+  const { calls, result } = await executeAccountFirst(
+    false,
+    "https://other-acme.fr"
+  );
+  expect(calls.some((call) => call.name.includes("searchPeople"))).toBe(false);
+  expect(result.peopleQueryStats).toMatchObject([
+    {
+      query: "Acme directeur marketing",
+      success: false,
+      skipped: true,
+      error: expect.stringContaining("Skipped"),
+    },
+  ]);
+  expect(result.success).toBe(true);
+});
+
+test("a provider outage stays a retryable failure rather than a consumed identity skip", async () => {
+  const { calls, result } = await executeAccountFirst(
+    false,
+    "https://acme.fr",
+    true
+  );
+  expect(calls.some((call) => call.name.includes("searchPeople"))).toBe(false);
+  expect(result.success).toBe(false);
+  expect(result.peopleQueryStats).toMatchObject([
+    {
+      success: false,
+      skipped: false,
+      error: expect.stringContaining("temporarily unavailable"),
+    },
+  ]);
+  expect(result.postQueryStats).toMatchObject([{ success: true }]);
 });
 
 test("a people provider failure preserves the completed post-search result", async () => {

@@ -80,6 +80,78 @@ afterEach(() => {
   vi.unstubAllEnvs();
 });
 
+test("peer searches consume one retrieval, skip identities honestly and retry provider outages", async () => {
+  const { t, workspaceId } = await fixture();
+  const spec = buildLegacyWorkspaceTargetingSpec({
+    description: "France",
+    profiles: [],
+  });
+  spec.discoveryMode = "peer_or_site_audit";
+  spec.searchHints.roleTitles = ["directeur marketing"];
+  await t.run((ctx) => ctx.db.patch(workspaceId, { targetingSpec: spec }));
+  const timestamp = Date.now() - 1000;
+  const queries = [
+    "SAP directeur marketing",
+    "Acme directeur marketing",
+    "Beta directeur marketing",
+    "Gamma directeur marketing",
+  ];
+  await t.mutation(internal.keywords.saveKeywordsBatch, {
+    workspaceId,
+    keywords: queries.map((value) => ({
+      type: "social_query" as const,
+      value,
+      source: `account_retrieval_hint:${timestamp}|https://${value.split(" ")[0].toLowerCase()}.fr/offre`,
+      platformTargets: ["linkedin" as const],
+      linkedinSurface: "people" as const,
+    })),
+  });
+  const rows = await t.run((ctx) =>
+    ctx.db
+      .query("keywords")
+      .withIndex("by_workspace", (q) => q.eq("workspaceId", workspaceId))
+      .collect()
+  );
+  for (const [index, query] of queries.slice(0, 3).entries()) {
+    const row = rows.find((row) => row.originalValue === query)!;
+    await t.mutation(internal.keywords.markQueriesAsSearched, {
+      queryIds: [row._id],
+      platform: "linkedin",
+      surface: "people",
+      queryStats: [
+        {
+          query,
+          postsFound: index === 0 ? 10 : 0,
+          success: index === 0,
+          ...(index === 1
+            ? { skipped: true, error: "Skipped: ambiguous company" }
+            : {}),
+        },
+      ],
+    });
+  }
+  const queue = await t.query(internal.keywords.getPrioritizedLinkedInQueries, {
+    workspaceId,
+    surface: "people",
+    limit: 2,
+  });
+  expect(queue.map((row) => row.value)).toEqual(queries.slice(2));
+  const skipped = rows.find((row) => row.originalValue === queries[1])!;
+  expect(
+    await t.run((ctx) =>
+      ctx.db
+        .query("queryPerformance")
+        .withIndex("by_workspace_query_id", (q) =>
+          q.eq("workspaceId", workspaceId).eq("queryId", skipped._id)
+        )
+        .first()
+    )
+  ).toMatchObject({ impressions: 0, prospectsFound: 0 });
+  expect(
+    (await t.run((ctx) => ctx.db.get(skipped._id)))?.linkedinResultsCount
+  ).toBeUndefined();
+});
+
 test("dated named people query survives short plan, storage and actual queue selection", async () => {
   const { t, workspaceId } = await fixture();
   // An older generic backlog must not consume the only execution seat.

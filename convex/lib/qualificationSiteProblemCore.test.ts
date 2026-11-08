@@ -93,6 +93,51 @@ test("native review reuses its source GET when confirming one real missing comme
   expect(request).toHaveBeenCalledTimes(3);
 });
 
+test("an HTTP employer entry upgrading to the same HTTPS URL retains evidence within three requests", async () => {
+  const httpHome = homeUrl.replace("https:", "http:");
+  const request = vi
+    .fn()
+    .mockResolvedValueOnce(page(httpHome, 301, "", { location: homeUrl }))
+    .mockResolvedValueOnce(page(homeUrl, 200, usefulHtml))
+    .mockResolvedValueOnce(page(targetUrl, 200, usefulHtml));
+  vi.stubGlobal("fetch", request);
+  const result = await reviewOfficialSitePages({
+    ...args,
+    officialWebsite: httpHome,
+  });
+  expect(request.mock.calls.map(([url]) => url)).toEqual([
+    httpHome,
+    homeUrl,
+    targetUrl,
+  ]);
+  expect(result.reviewedPages.map(({ url }) => url)).toEqual([
+    homeUrl,
+    targetUrl,
+  ]);
+  expect(result.siteProblems).toEqual([]);
+});
+
+test.each([
+  "https://other.example/",
+  "https://acme.example/admin",
+  "http://127.0.0.1/",
+])(
+  "an HTTP entry cannot redirect the evidence reader to %s",
+  async (location) => {
+    const httpHome = homeUrl.replace("https:", "http:");
+    const request = vi
+      .fn()
+      .mockResolvedValueOnce(page(httpHome, 301, "", { location }));
+    vi.stubGlobal("fetch", request);
+    const result = await reviewOfficialSitePages({
+      ...args,
+      officialWebsite: httpHome,
+    });
+    expect(request).toHaveBeenCalledTimes(1);
+    expect(result.reviewedPages).toEqual([]);
+  }
+);
+
 test("reviewed title and content never come from markup inside scripts or attributes", async () => {
   const html = `<html><head><script>const example='<title>Fake title</title>';</script><title>Real &amp; useful offer</title></head><body><div title='<main>Fake main</main><title>Another fake title</title>'></div><main>Acme provides real business software and first-party operating documentation for professional teams.</main></body></html>`;
   vi.stubGlobal(

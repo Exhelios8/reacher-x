@@ -65,6 +65,7 @@ export interface LinkedInPeopleQueryStat {
   success: boolean;
   searchMode: "title" | "keyword";
   error?: string;
+  skipped?: boolean;
 }
 
 export interface LinkedInPeopleBatchSearchResult {
@@ -80,6 +81,7 @@ export interface LinkedInPeopleBatchSearchResult {
     requestedLocation?: string;
     geoUrn?: string;
     profileLanguage?: string;
+    currentCompany?: string;
   }>;
   stats: {
     queriesExecuted: number;
@@ -193,6 +195,7 @@ async function collectPaginatedPeopleResults(
     searchMode: "title" | "keyword";
     geoUrn?: string;
     profileLanguage?: string;
+    currentCompany?: string;
     count: number;
     initialResult: InternalSearchPeopleResult;
     maxPages?: number;
@@ -226,6 +229,9 @@ async function collectPaginatedPeopleResults(
           searchMode: args.searchMode,
           geoUrn: args.geoUrn,
           profileLanguage: args.profileLanguage,
+          ...(args.currentCompany
+            ? { currentCompany: args.currentCompany }
+            : {}),
           start: nextStart,
           count: args.count,
         }
@@ -288,6 +294,7 @@ export const searchInternal = internalAction({
     count: v.optional(v.number()),
     geoUrn: v.optional(v.string()),
     profileLanguage: v.optional(v.string()),
+    currentCompany: v.optional(v.string()),
   },
   handler: async (ctx, args): Promise<InternalSearchPeopleResult> => {
     try {
@@ -297,6 +304,7 @@ export const searchInternal = internalAction({
           [args.searchMode === "title" ? "title" : "keyword"]: args.query,
           geoUrn: args.geoUrn,
           profileLanguage: args.profileLanguage,
+          currentCompany: args.currentCompany,
           count: args.count ?? LINKEDIN_PEOPLE_DEFAULT_COUNT,
           start: args.start,
         },
@@ -339,9 +347,12 @@ export const searchBatch = action({
     location: v.optional(v.string()),
     profileLanguage: v.optional(v.string()),
     accountFirstDiscovery: v.optional(v.boolean()),
+    currentCompany: v.optional(v.string()),
   },
   handler: async (ctx, args): Promise<LinkedInPeopleBatchSearchResult> => {
     const startTime = getCurrentUTCTimestamp();
+    if (args.currentCompany !== undefined && !/^\d+$/.test(args.currentCompany))
+      throw new Error("Invalid LinkedIn company ID");
     const requestedCount = args.accountFirstDiscovery
       ? Math.min(
           Math.max(
@@ -406,7 +417,7 @@ export const searchBatch = action({
       const attempts: LinkedInPeopleSearchAttempt[] = args.accountFirstDiscovery
         ? [
             {
-              searchMode: "keyword",
+              searchMode: args.currentCompany ? "title" : "keyword",
               geoUrn,
               profileLanguage: args.profileLanguage,
             },
@@ -429,6 +440,9 @@ export const searchBatch = action({
                 searchMode: attempts[0].searchMode,
                 geoUrn: attempts[0].geoUrn,
                 profileLanguage: attempts[0].profileLanguage,
+                ...(args.currentCompany
+                  ? { currentCompany: args.currentCompany }
+                  : {}),
                 count: requestedCount,
               }
             );
@@ -510,6 +524,9 @@ export const searchBatch = action({
               searchMode,
               geoUrn: attempt.geoUrn,
               profileLanguage: attempt.profileLanguage,
+              ...(args.currentCompany
+                ? { currentCompany: args.currentCompany }
+                : {}),
               count: requestedCount,
               initialResult,
               maxPages: args.accountFirstDiscovery
@@ -542,6 +559,7 @@ export const searchBatch = action({
               searchMode: result.searchMode,
             });
             queryResults.push({
+              currentCompany: args.currentCompany,
               requestedLocation: args.location,
               geoUrn: finalAttempt.geoUrn,
               profileLanguage: finalAttempt.profileLanguage,
@@ -578,6 +596,9 @@ export const searchBatch = action({
               searchMode: nextAttempt.searchMode,
               geoUrn: nextAttempt.geoUrn,
               profileLanguage: nextAttempt.profileLanguage,
+              ...(args.currentCompany
+                ? { currentCompany: args.currentCompany }
+                : {}),
               count: requestedCount,
             }
           );
@@ -596,6 +617,7 @@ export const searchBatch = action({
             errors.push({ query, error: finalError });
           } else {
             queryResults.push({
+              currentCompany: args.currentCompany,
               requestedLocation: args.location,
               geoUrn: finalAttempt.geoUrn,
               profileLanguage: finalAttempt.profileLanguage,
