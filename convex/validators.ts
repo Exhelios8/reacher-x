@@ -103,6 +103,7 @@ export const targetingCriterionEvidenceValidator = v.union(
 export const targetingCriterionValidator = v.object({
   id: v.string(),
   requiresProblemEvidence: v.optional(v.literal(true)),
+  employeeRange: v.optional(v.object({ min: v.number(), max: v.number() })),
   label: v.string(),
   description: v.string(),
   sourceQuote: v.optional(v.string()),
@@ -179,6 +180,9 @@ export const qualificationCriterionResultValidator = v.object({
   confidence: v.number(),
   rationale: v.string(),
   sourceIds: v.array(v.string()),
+  employeeEvidence: v.optional(
+    v.object({ sourceUrl: v.string(), quote: v.string() })
+  ),
   problemEvidence: v.optional(
     v.object({
       sourceId: v.string(),

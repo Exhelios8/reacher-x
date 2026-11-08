@@ -25,6 +25,24 @@ export function isRequiredProblemCriterion(
 export type DiscoveryStage = "strict" | "balanced" | "broad";
 export function validateOperatorTargeting(spec: WorkspaceTargetingSpec): void {
   spec.criteria.forEach(isRequiredProblemCriterion);
+  const bounded = spec.criteria.filter((c) => c.employeeRange);
+  for (const criterion of bounded) {
+    const { min, max } = criterion.employeeRange!;
+    if (
+      bounded.length !== 1 ||
+      criterion.kind !== "required" ||
+      criterion.category !== "profile_fit" ||
+      criterion.evidence === "activity" ||
+      !Number.isSafeInteger(min) ||
+      !Number.isSafeInteger(max) ||
+      min < 0 ||
+      max < min ||
+      spec.criteria.indexOf(criterion) >= MAX_CRITERIA
+    )
+      throw new Error(
+        "employeeRange requires one required employer profile criterion with ordered, inclusive integer bounds."
+      );
+  }
   if (
     spec.discoveryMode === "peer_or_site_audit" &&
     spec.criteria.some(isRequiredProblemCriterion)
@@ -74,21 +92,25 @@ export function preserveRequiredProblemCriterion(
     validateOperatorTargeting(previous);
     return previous;
   }
-  const required = previous?.criteria.find(isRequiredProblemCriterion);
-  if (!required) return generated;
-  if (generated.criteria.some((criterion) => criterion.id === required.id)) {
-    return {
-      ...generated,
-      criteria: generated.criteria.map((criterion) =>
-        criterion.id === required.id ? required : criterion
-      ),
-    };
-  }
-  if (generated.criteria.length >= MAX_CRITERIA)
+  const preserved = previous?.criteria.filter(
+    (criterion) =>
+      isRequiredProblemCriterion(criterion) || criterion.employeeRange
+  );
+  if (!preserved?.length) return generated;
+  const byId = new Map(preserved.map((criterion) => [criterion.id, criterion]));
+  const criteria = generated.criteria.map(
+    (criterion) => byId.get(criterion.id) ?? criterion
+  );
+  criteria.push(
+    ...preserved.filter(
+      (criterion) => !criteria.some((item) => item.id === criterion.id)
+    )
+  );
+  if (criteria.length > MAX_CRITERIA)
     throw new Error(
-      "Targeting revision has no room for the required problem criterion."
+      "Targeting revision has no room for the required operator criteria."
     );
-  return { ...generated, criteria: [...generated.criteria, required] };
+  return { ...generated, criteria };
 }
 
 function normalizeText(value: string): string {

@@ -4,6 +4,7 @@
 // Used by: workflows/qualification.ts, agents/tools/qualifyProspect.ts
 
 import { z } from "zod";
+import { verifyEmployeeRange } from "./employeeRangeCore";
 import {
   noPeerRoute,
   peerRouteSchema,
@@ -169,7 +170,12 @@ const llmQualificationWithProblemSchema = llmQualificationSchema.extend({
 const llmPeerQualificationSchema = llmQualificationSchema.extend({
   routeAssessment: peerRouteSchema,
 });
+const employeeStatementSchema = z.object({
+  sourceUrl: z.string().trim().max(2048),
+  quote: z.string().trim().max(500),
+});
 type EvaluatorResponse = z.infer<typeof llmQualificationSchema> & {
+  employeeStatement?: z.infer<typeof employeeStatementSchema>;
   problemEvidence?: z.infer<typeof problemAssessmentSchema>;
   routeAssessment?: PeerRouteProposal;
 };
@@ -416,6 +422,9 @@ export async function qualifyProspectCore(
     isRequiredProblemCriterion
   );
   const peerOrSite = targetingSpec.discoveryMode === "peer_or_site_audit";
+  const employeeCriterion = targetingSpec.criteria.find(
+    (criterion) => criterion.employeeRange
+  );
   const candidates = prepareQualificationCandidates({
     platform,
     evidencePosts: evidencePosts.slice(0, MAX_EVIDENCE_POSTS),
@@ -569,6 +578,7 @@ ${requiresProblemEvidence ? `A third eligible primary source is observed_site_pr
 ${peerOrSite ? `This workspace has two independent acquisition paths. A documented comparable offer sold to the relevant buyer/use qualifies even with existing SEO, successful work, unknown purchasing intent and no personal posts. Do not infer a peer from a customer, supplier, partner, technology user or shared industry alone. For peer require peer_fit=matched and quote what this employer actually sells. For another company, use observed_problem only for a verified current HTTP finding, testable_opportunity for a specific plausible improvement on an inspected page, or exploration for a justified question about specific visible products, documentation, services or content worth discussing. A healthy site can support exploration. A generic title, URL, news item or vague "could improve SEO" is insufficient. Do not claim a defect, urgency, demand, budget or intent from a hypothesis. Use need=unknown when appropriate. For routeAssessment give the sourceUrl and verbatim sourceQuote. Explain the buyer/offer similarity or site observation in rationale and the work or test in offerOrRemedy. For 404/410 quote the measured HTTP status and cite the live linking page. Use verified employer reviewedPages (HTTP 200 and observedAt), the official employer profile description (company sourceUrl), or separately verified company sources. A verified contact profile describing a relevant role supports qualification even without a personal publication. Return none and empty missing fields when neither route is grounded. Keep criterion verdicts and numerical scores honest, independently of route. Verified employer evidence: ${JSON.stringify(employerEvidence ?? null)}` : ""}
 
 Return exactly one criterionResults entry for every targeting criterion ID.
+${employeeCriterion ? `For employeeStatement return the official URL and exact full present-tense sentence only if a reviewedPage establishes this verified employer's own current total salaried headcount. Exclude historical counts, projections, testimonials, team rosters, subsidiary/site/division counts, clients and associated LinkedIn member counts. Use empty strings if no such sentence exists. The company's declared staffCountRange is assessed separately. ${peerOrSite ? "" : JSON.stringify(employerEvidence ?? null)}` : ""}
 ${peerOrSite ? "For role, cite the verified personal profile Candidate ID and an evidence decision quoting their current responsibility. A corporate page cannot establish the person's role." : ""}
 - matched means the available profile or correctly attributed candidate evidence directly satisfies the criterion, within the source restrictions above.
 - partial means there is genuine but incomplete support.
@@ -608,14 +618,17 @@ ${similarDisqualifiedCases?.join("\n") || "None"}
 Evaluate this prospect against the ICP.`;
 
   try {
+    const schema = peerOrSite
+      ? llmPeerQualificationSchema
+      : requiresProblemEvidence
+        ? llmQualificationWithProblemSchema
+        : llmQualificationSchema;
     const generateQualificationCandidate = async (repairInstruction?: string) =>
       await robustGenerateObject<EvaluatorResponse>({
         operation: "qualifyProspect",
-        schema: peerOrSite
-          ? llmPeerQualificationSchema
-          : requiresProblemEvidence
-            ? llmQualificationWithProblemSchema
-            : llmQualificationSchema,
+        schema: employeeCriterion
+          ? schema.extend({ employeeStatement: employeeStatementSchema })
+          : schema,
         system: [
           buildQualificationPrompt(useCaseKey, peerOrSite),
           workspaceMemoryPolicy,
@@ -753,6 +766,22 @@ Evaluate this prospect against the ICP.`;
         };
       }),
     });
+    let unresolvedSize: QualificationCriterionResult | undefined;
+    if (employeeCriterion?.employeeRange) {
+      const index = criterionResults.findIndex(
+        (item) => item.criterionId === employeeCriterion.id
+      );
+      const size = verifyEmployeeRange({
+        criterionId: employeeCriterion.id,
+        target: employeeCriterion.employeeRange,
+        profile: profileData,
+        employer: platform === "linkedin" ? employerEvidence : undefined,
+        statement: object.employeeStatement,
+        now,
+      });
+      criterionResults[index] = size;
+      if (size.verdict !== "matched") unresolvedSize = size;
+    }
     const targetingScore = calculateTargetingQualificationScore({
       spec: targetingSpec,
       results: criterionResults,
@@ -877,11 +906,13 @@ Evaluate this prospect against the ICP.`;
         (finalQualified ||
           (!goalConflict && !targetingScore.hardFailureCriterionIds.length))
           ? route.rationale
-          : (unprovenProblem?.rationale ?? object.reasoning),
+          : (unresolvedSize?.rationale ??
+            unprovenProblem?.rationale ??
+            object.reasoning),
       reasoning: goalConflict
         ? `${object.reasoning} Evidence contradicts the user's contact goal: ${object.goalAssessment.rationale} Quote: ${object.goalAssessment.conflictingQuote}`
         : targetingScore.hardFailureCriterionIds.length > 0
-          ? `${object.reasoning} Hard qualification gates not satisfied: ${targetingScore.hardFailureCriterionIds.join(", ")}.`
+          ? `${unresolvedSize?.rationale ?? object.reasoning} Hard qualification gates not satisfied: ${targetingScore.hardFailureCriterionIds.join(", ")}.`
           : object.reasoning,
       qualifiedAt: finalQualified ? now : undefined,
     };

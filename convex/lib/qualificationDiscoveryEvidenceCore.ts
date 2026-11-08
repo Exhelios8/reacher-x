@@ -20,6 +20,7 @@ import {
 import { classifyProviderFailure } from "./providerReliability";
 
 import { isAccountFirstDiscoveryEnabled } from "./accountFirstDiscoveryCore";
+import { classifyDeclaredEmployeeRange } from "./employeeRangeCore";
 import {
   observeOfficialSiteProblem,
   QualificationSiteProblemRetryableError,
@@ -128,18 +129,23 @@ export async function collectQualificationDiscoveryEvidence(
   const directSiteAuditEnabled =
     isAccountFirstDiscoveryEnabled(prospect.workspaceId) &&
     workspace.targetingSpec?.discoveryMode === "peer_or_site_audit";
+  const employeeRange = workspace.targetingSpec?.criteria.find(
+    (criterion) => criterion.employeeRange
+  )?.employeeRange;
   const employerEvidenceEnabled =
-    employerEventsEnabled || directSiteAuditEnabled;
+    employerEventsEnabled || directSiteAuditEnabled || Boolean(employeeRange);
   const observeSiteProblems =
     directSiteAuditEnabled ||
     (employerEventsEnabled && eventCriteria.some(isRequiredProblemCriterion));
-  const contextVersion = directSiteAuditEnabled
-    ? 5
-    : observeSiteProblems
-      ? 4
-      : employerEventsEnabled
-        ? 3
-        : 2;
+  const contextVersion = employeeRange
+    ? 6
+    : directSiteAuditEnabled
+      ? 5
+      : observeSiteProblems
+        ? 4
+        : employerEventsEnabled
+          ? 3
+          : 2;
   const cachedData = prospect.qualificationProfileData;
   const cachedEmployer =
     isRecord(cachedData) && isRecord(cachedData.employerEvidence)
@@ -340,7 +346,14 @@ export async function collectQualificationDiscoveryEvidence(
     let siteReview:
       | Awaited<ReturnType<typeof reviewOfficialSitePages>>
       | undefined;
-    if (directSiteAuditEnabled && typeof company.website === "string") {
+    const needsSizeStatement =
+      employeeRange &&
+      classifyDeclaredEmployeeRange(company.staffCountRange, employeeRange) ===
+        "unknown";
+    if (
+      (directSiteAuditEnabled || needsSizeStatement) &&
+      typeof company.website === "string"
+    ) {
       try {
         siteReview = await reviewOfficialSitePages({
           companyId: employerId,
@@ -494,6 +507,8 @@ export async function collectQualificationDiscoveryEvidence(
           8000
         ),
         website: company.website,
+        staffCountRange: company.staffCountRange,
+        linkedInAssociatedProfiles: company.staffCount,
         headquarter: {
           city: headquarters.city,
           country: headquarters.country,

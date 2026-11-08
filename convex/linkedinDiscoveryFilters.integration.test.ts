@@ -111,7 +111,12 @@ describe("LinkedIn discovery stages at the provider boundary", () => {
 async function executeAccountFirst(
   peopleFail = false,
   companyWebsite = "https://acme.fr",
-  companyOutage = false
+  companyOutage = false,
+  size?: {
+    staffCountRange?: string;
+    staffCount?: number;
+    kind?: "required" | "preferred";
+  }
 ) {
   vi.stubEnv("ACCOUNT_FIRST_DISCOVERY_WORKSPACE_IDS", "workspace");
   const calls: Array<{ name: string; args: Record<string, unknown> }> = [];
@@ -120,6 +125,15 @@ async function executeAccountFirst(
     name: "QA",
     targetingSpec: {
       discoveryMode: "peer_or_site_audit",
+      criteria: size
+        ? [
+            {
+              id: "company_size",
+              kind: size.kind ?? "required",
+              employeeRange: { min: 5, max: 200 },
+            },
+          ]
+        : [],
       searchHints: { roleTitles: ["directeur marketing"] },
       searchFilters: {
         linkedinPosts: { datePosted: "past-year" },
@@ -162,7 +176,13 @@ async function executeAccountFirst(
       if (name === "integrations/linkedin/getCompany:getCompany")
         return {
           success: true,
-          company: { id: "123", name: "Acme", website: companyWebsite },
+          company: {
+            id: "123",
+            name: "Acme",
+            website: companyWebsite,
+            staffCountRange: size?.staffCountRange,
+            staffCount: size?.staffCount,
+          },
         };
       if (peopleFail && name.includes("searchPeople"))
         throw new Error("People provider unavailable");
@@ -264,3 +284,49 @@ test("a people provider failure preserves the completed post-search result", asy
   ]);
   expect(result.error).toContain("People provider unavailable");
 });
+
+test.each(["1-4 employees", "201-500 employees"])(
+  "a declared %s company is skipped before paid people search without penalizing the query",
+  async (staffCountRange) => {
+    const { calls, result } = await executeAccountFirst(
+      false,
+      "https://acme.fr",
+      false,
+      { staffCountRange, staffCount: 197 }
+    );
+    expect(calls.some((call) => call.name.includes("searchPeople"))).toBe(
+      false
+    );
+    expect(result.success).toBe(true);
+    expect(result.peopleQueryStats).toMatchObject([
+      {
+        query: "Acme directeur marketing",
+        success: false,
+        skipped: true,
+        error: expect.stringContaining("outside the required employee range"),
+      },
+    ]);
+    expect(result.postQueryStats).toMatchObject([{ success: true }]);
+  }
+);
+
+test.each([
+  { staffCountRange: "5-5 employees" },
+  { staffCountRange: "200-200 employees" },
+  { staffCountRange: "2-10 employees" },
+  { staffCountRange: "unknown", staffCount: 197 },
+  { staffCount: 197 },
+  { staffCountRange: "201-500 employees", kind: "preferred" as const },
+])(
+  "in-bounds or ambiguous size and optional criteria preserve discovery: %j",
+  async (size) => {
+    const { calls, result } = await executeAccountFirst(
+      false,
+      "https://acme.fr",
+      false,
+      size
+    );
+    expect(result.success).toBe(true);
+    expect(calls.some((call) => call.name.includes("searchPeople"))).toBe(true);
+  }
+);

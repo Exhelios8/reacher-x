@@ -110,6 +110,40 @@ function exampleSpec(): WorkspaceTargetingSpec {
   };
 }
 
+test("retains validated inclusive employer bounds across normalization and automatic revision", () => {
+  const previous = exampleSpec();
+  const criterion = {
+    ...previous.criteria[0],
+    id: "company_size",
+    kind: "required" as const,
+    employeeRange: { min: 5, max: 200 },
+  };
+  previous.criteria = [criterion];
+  const normalized = normalizeWorkspaceTargetingSpec(previous);
+  expect(normalized.criteria[0]).toEqual(criterion);
+  expect(
+    preserveRequiredProblemCriterion(exampleSpec(), normalized).criteria
+  ).toContainEqual(criterion);
+  for (const employeeRange of [
+    { min: 5, max: 4 },
+    { min: -1, max: 10 },
+    { min: 4.5, max: 10 },
+  ]) {
+    expect(() =>
+      normalizeWorkspaceTargetingSpec({
+        ...previous,
+        criteria: [{ ...criterion, employeeRange }],
+      })
+    ).toThrow("employeeRange");
+  }
+  expect(() =>
+    normalizeWorkspaceTargetingSpec({
+      ...previous,
+      criteria: [{ ...criterion, kind: "preferred" }],
+    })
+  ).toThrow("employeeRange");
+});
+
 test("a peer-or-audit specification survives ordinary regeneration and explicitly replaces earlier strict problem controls", () => {
   const generated = exampleSpec();
   const previousNeed: WorkspaceTargetingSpec = {

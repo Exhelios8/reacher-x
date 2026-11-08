@@ -247,6 +247,8 @@ describe("verified current employer context", () => {
     linkedinUrl: "https://www.linkedin.com/company/courses/",
     website: "https://courses.example",
     description: "Commercial learning software",
+    staffCount: 197,
+    staffCountRange: "201-500 employees",
     headquarter: { city: "Paris", country: "FR", countryCode: "FR" },
     industriesV2: ["Software"],
   };
@@ -298,6 +300,8 @@ describe("verified current employer context", () => {
       company: {
         name: "Courses",
         website: company.website,
+        staffCountRange: "201-500 employees",
+        linkedInAssociatedProfiles: 197,
         headquarter: { countryCode: "FR" },
         industries: ["Software"],
       },

@@ -6,6 +6,7 @@ import {
   isVerifiedAccountCompany,
 } from "../lib/accountFirstDiscoveryCore";
 import { getLearningTargetingFingerprint } from "../lib/learningTargetingHelpers";
+import { classifyDeclaredEmployeeRange } from "../lib/employeeRangeCore";
 // convex/workflows/prospecting.ts
 // Continuous 24/7 prospecting workflow using Convex Workflow component
 //
@@ -1608,6 +1609,36 @@ export const searchLinkedInInternal = internalAction({
                     searchMode: "title" as const,
                     skipped: !retryable,
                     error,
+                  },
+                ],
+              };
+            }
+            const declaredEmployeeRange = resolved.company.staffCountRange;
+            const outsideRequiredEmployeeRange =
+              workspace.targetingSpec?.criteria.some(
+                (criterion) =>
+                  criterion.kind === "required" &&
+                  criterion.employeeRange &&
+                  classifyDeclaredEmployeeRange(
+                    declaredEmployeeRange,
+                    criterion.employeeRange
+                  ) === "not_matched"
+              );
+            if (outsideRequiredEmployeeRange) {
+              return {
+                success: true,
+                people: [] as LinkedInPerson[],
+                matchedQueriesByPersonUrn: {} as Record<string, string[]>,
+                errors: [],
+                queryStats: [
+                  {
+                    query: value,
+                    peopleFound: 0,
+                    success: false,
+                    searchMode: "title" as const,
+                    skipped: true,
+                    error:
+                      "Skipped: declared company size is outside the required employee range",
                   },
                 ],
               };

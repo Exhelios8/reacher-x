@@ -88,6 +88,17 @@ const proposal: PeerRouteProposal = {
   rationale: "Same legal buyers and document-management workflow.",
   offerOrRemedy: "Review the legal product pages and their documentation.",
 };
+const sizeCriterion: WorkspaceTargetingSpec["criteria"][number] = {
+  id: "company_size",
+  label: "Employer size",
+  description: "5–200 employees",
+  kind: "required",
+  category: "profile_fit",
+  evidence: "profile",
+  weight: 5,
+  terms: [],
+  employeeRange: { min: 5, max: 200 },
+};
 beforeEach(() => {
   vi.useFakeTimers();
   vi.setSystemTime(new Date(now));
@@ -115,9 +126,12 @@ async function evaluate(
     measured?: boolean;
     nativeContext?: ActionCtx;
     xOnly?: boolean;
+    size?: { range?: string; statement?: string; pageText?: string };
   } = {}
 ) {
   const route = opts.route ?? "peer";
+  const criteria = [...spec.criteria];
+  if (opts.size) criteria.push(sizeCriterion);
   const candidateId = `profile:linkedin:${profile.urn}`;
   const measuredQuote = "Observed HTTP 404, confirmed by two GET requests.";
   const measuredText = `Official page: ${siteUrl}\nLinked commercial or documentation URL: https://acme.example/docs/missing\nLink label: Documentation API\n${measuredQuote}\nObserved at: ${now}`;
@@ -172,6 +186,14 @@ async function evaluate(
       isLikelyBot: false,
       botFlags: [],
       reasoning: "Evaluate the evidence available.",
+      ...(opts.size
+        ? {
+            employeeStatement: {
+              sourceUrl: siteUrl,
+              quote: opts.size.statement ?? "",
+            },
+          }
+        : {}),
       routeAssessment: {
         ...proposal,
         route,
@@ -199,7 +221,7 @@ async function evaluate(
           attributedToEmployer: false,
         },
       ],
-      criterionResults: spec.criteria.map((c) => ({
+      criterionResults: criteria.map((c) => ({
         criterionId: c.id,
         verdict: verdict(c.id),
         confidence: 1,
@@ -222,6 +244,7 @@ async function evaluate(
     problemSourceUnavailable: opts.outage,
     targetingSpec: {
       ...spec,
+      criteria,
       discoveryMode: opts.legacy ? undefined : spec.discoveryMode,
     },
     employerEvidence: opts.unverified
@@ -230,12 +253,22 @@ async function evaluate(
           ...enrichedEmployer,
           company: {
             ...employer.company,
+            ...(opts.size
+              ? {
+                  staffCountRange: opts.size.range,
+                  linkedInAssociatedProfiles: 197,
+                }
+              : {}),
             website: opts.reference
               ? "https://sub.client.example"
               : employer.company.website,
           },
           reviewedPages: [
-            { ...page, observedAt: opts.stale ? "2024-01-01" : now },
+            {
+              ...page,
+              text: opts.size?.pageText ?? page.text,
+              observedAt: opts.stale ? "2024-01-01" : now,
+            },
           ],
           siteProblemFetchRetryable: opts.outage,
         },
@@ -252,91 +285,117 @@ async function evaluate(
   return qualifyProspectCore(params);
 }
 
-test("actual qualification entry collects a French employer's healthy offer page and qualifies a profile with no social posts", async () => {
-  vi.stubEnv("ACCOUNT_FIRST_DISCOVERY_WORKSPACE_IDS", "workspace");
-  const rawProspect = {
-    _id: "prospect",
-    workspaceId: "workspace",
-    platform: "linkedin",
-    discoverySource: "search_people",
-    qualificationStatus: "pending",
-    linkedinUsername: "marie-example",
-    linkedinUserUrn: profile.urn,
-    data: { username: "marie-example", urn: profile.urn },
-    evidencePosts: [],
-  };
-  const runQuery = vi
-    .fn()
-    .mockResolvedValueOnce(rawProspect)
-    .mockResolvedValue({
-      description: spec.summary,
-      targetingSpec: spec,
-      icps: [],
+test.each([
+  [undefined, true],
+  ["201-500 employees", false],
+] as const)(
+  "actual qualification entry gates a verified current employer (%s) with no social posts",
+  async (staffCountRange, qualified) => {
+    vi.stubEnv("ACCOUNT_FIRST_DISCOVERY_WORKSPACE_IDS", "workspace");
+    const rawProspect = {
+      _id: "prospect",
+      workspaceId: "workspace",
+      platform: "linkedin",
+      discoverySource: "search_people",
+      qualificationStatus: "pending",
+      linkedinUsername: "marie-example",
+      linkedinUserUrn: profile.urn,
+      data: { username: "marie-example", urn: profile.urn },
+      evidencePosts: [],
+    };
+    const runQuery = vi
+      .fn()
+      .mockResolvedValueOnce(rawProspect)
+      .mockResolvedValue({
+        description: spec.summary,
+        targetingSpec: staffCountRange
+          ? { ...spec, criteria: [...spec.criteria, sizeCriterion] }
+          : spec,
+        icps: [],
+      });
+    const runAction = vi
+      .fn()
+      .mockResolvedValueOnce({
+        success: true,
+        profile: {
+          ...profile,
+          id: 123,
+          username: "marie-example",
+          headline: text,
+          summary: text,
+          currentPositions: [{ company: { id: "42" } }],
+          position: [
+            {
+              title: text,
+              companyName: "Acme",
+              companyId: "42",
+              end: { year: 0 },
+            },
+          ],
+        },
+      })
+      .mockResolvedValueOnce({
+        success: true,
+        company: {
+          id: "42",
+          name: "Acme",
+          linkedinUrl: employer.sourceUrl,
+          website: "https://acme.example",
+          description: quote,
+          staffCount: 197,
+          staffCountRange,
+          headquarter: { countryCode: "FR" },
+        },
+      })
+      .mockResolvedValueOnce({ posts: [] });
+    const fetchStub = vi.fn(async (url: string) => {
+      const html = `<html><title>Acme</title><main><h1>${quote}</h1><p>Services documentaires proposés par Acme aux professionnels français.</p><a href="/solutions">Solutions Acme</a></main></html>`;
+      const response = new Response(html, {
+        status: 200,
+        headers: { "content-type": "text/html" },
+      });
+      Object.defineProperty(response, "url", { value: new URL(url).href });
+      return response;
     });
-  const runAction = vi
-    .fn()
-    .mockResolvedValueOnce({
-      success: true,
-      profile: {
-        ...profile,
-        id: 123,
-        username: "marie-example",
-        headline: text,
-        summary: text,
-        currentPositions: [{ company: { id: "42" } }],
-        position: [
-          {
-            title: text,
-            companyName: "Acme",
-            companyId: "42",
-            end: { year: 0 },
+    vi.stubGlobal("fetch", fetchStub);
+    const runMutation = vi.fn().mockResolvedValue(null);
+    const result = await evaluate({
+      ...(staffCountRange ? { size: {} } : {}),
+      nativeContext: {
+        runQuery,
+        runAction,
+        runMutation,
+      } as unknown as ActionCtx,
+    });
+    expect(result).toMatchObject({
+      qualified,
+      qualificationVerification: {
+        routeAssessment: {
+          route: "peer",
+          sourceUrl: siteUrl,
+          sourceQuote: quote,
+          needStatus: "unknown",
+        },
+      },
+    });
+    expect(fetchStub.mock.calls.map((c) => new URL(c[0]).hostname)).toContain(
+      "acme.example"
+    );
+    expect(fetchStub.mock.calls.length).toBeLessThanOrEqual(3);
+    expect(runMutation).toHaveBeenCalled();
+    if (staffCountRange)
+      expect(result.criterionResults).toContainEqual(
+        expect.objectContaining({
+          criterionId: "company_size",
+          verdict: "not_matched",
+          employeeEvidence: {
+            sourceUrl: employer.sourceUrl,
+            quote: staffCountRange,
           },
-        ],
-      },
-    })
-    .mockResolvedValueOnce({
-      success: true,
-      company: {
-        id: "42",
-        name: "Acme",
-        linkedinUrl: employer.sourceUrl,
-        website: "https://acme.example",
-        description: quote,
-        headquarter: { countryCode: "FR" },
-      },
-    })
-    .mockResolvedValueOnce({ posts: [] });
-  const fetchStub = vi.fn(async (url: string) => {
-    const html = `<html><title>Acme</title><main><h1>${quote}</h1><p>Services documentaires proposés par Acme aux professionnels français.</p><a href="/solutions">Solutions Acme</a></main></html>`;
-    const response = new Response(html, {
-      status: 200,
-      headers: { "content-type": "text/html" },
-    });
-    Object.defineProperty(response, "url", { value: new URL(url).href });
-    return response;
-  });
-  vi.stubGlobal("fetch", fetchStub);
-  const runMutation = vi.fn().mockResolvedValue(null);
-  const result = await evaluate({
-    nativeContext: { runQuery, runAction, runMutation } as unknown as ActionCtx,
-  });
-  expect(result).toMatchObject({
-    qualified: true,
-    qualificationVerification: {
-      routeAssessment: {
-        route: "peer",
-        sourceUrl: siteUrl,
-        sourceQuote: quote,
-        needStatus: "unknown",
-      },
-    },
-  });
-  expect(fetchStub.mock.calls.map((c) => new URL(c[0]).hostname)).toContain(
-    "acme.example"
-  );
-  expect(fetchStub.mock.calls.length).toBeLessThanOrEqual(3);
-  expect(runMutation).toHaveBeenCalled();
-});
+        })
+      );
+  }
+);
 test("confirmed current-site problem qualifies a non-peer and X-only records stay research-only", async () => {
   const verified = await evaluate({
     route: "observed_problem",
@@ -356,6 +415,92 @@ test("confirmed current-site problem qualifies a non-peer and X-only records sta
     },
   });
 });
+test.each([
+  ["1-4 employees", "not_matched"],
+  ["5 employees", "matched"],
+  ["11-50 employees", "matched"],
+  ["51–200 employees", "matched"],
+  ["200 employees", "matched"],
+  ["201-500 employees", "not_matched"],
+  ["10,001+ employees", "not_matched"],
+  ["2-10 employees", "unknown"],
+  ["50+ employees", "unknown"],
+  [undefined, "unknown"],
+] as const)(
+  "declared headcount %s overrides the model and 197 associated profiles",
+  async (range, verdict) => {
+    const result = await evaluate({ size: { range } });
+    const criterion = result.criterionResults.find(
+      (item) => item.criterionId === "company_size"
+    );
+    expect(result.qualified).toBe(verdict === "matched");
+    expect(criterion?.verdict).toBe(verdict);
+    if (verdict !== "unknown")
+      expect(criterion?.employeeEvidence).toEqual({
+        sourceUrl: employer.sourceUrl,
+        quote: range,
+      });
+  }
+);
+
+test.each([
+  ["Nous employons 8 salariés.", true],
+  ["Acme compte entre 5 et 10 salariés.", true],
+  ["We currently employ 5 employees.", true],
+  ["Acme employait 8 salariés.", false],
+  ["Le client compte 8 salariés.", false],
+  ["Nous accompagnons 8 salariés.", false],
+  ["Nous employons 8 salariés en France.", false],
+])(
+  "a current payroll statement resolves an overlapping company range: %s",
+  async (statement, eligible) => {
+    const result = await evaluate({
+      size: {
+        range: "2-10 employees",
+        statement,
+        pageText: quote + ". " + statement,
+      },
+    });
+    expect(result.qualified).toBe(eligible);
+    if (eligible)
+      expect(
+        result.criterionResults.find(
+          (item) => item.criterionId === "company_size"
+        )?.employeeEvidence
+      ).toEqual({ sourceUrl: siteUrl, quote: statement });
+  }
+);
+
+test("a fabricated payroll citation cannot qualify a small employer", async () => {
+  expect(
+    (
+      await evaluate({
+        size: {
+          range: "2-10 employees",
+          statement: "Nous employons 8 salariés.",
+        },
+      })
+    ).qualified
+  ).toBe(false);
+});
+test.each([
+  "In 2019, We have 8 employees.",
+  "We have 8 employees in our Paris sales team.",
+  "Customer testimonial. We have 8 employees.",
+  "We have 8 employees, including only the Paris office.",
+])(
+  "an extracted substring cannot hide a dated, partial or client count: %s",
+  async (sentence) => {
+    const result = await evaluate({
+      size: {
+        range: "2-10 employees",
+        statement: "We have 8 employees",
+        pageText: quote + ". " + sentence,
+      },
+    });
+    expect(result.qualified).toBe(false);
+  }
+);
 test("verified peer can receive a manual pitch with zero posts, unknown need and score below 70", async () => {
   const result = await evaluate({ outage: true });
   expect(result.qualified).toBe(true);
