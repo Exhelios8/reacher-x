@@ -200,7 +200,7 @@ test("account-first action rechecks named eligibility and preserves filters desp
   const people = calls.find((call) => call.name.includes("searchPeople"))!;
   const posts = calls.find((call) => call.name.includes("searchPosts"))!;
   expect(people.args).toMatchObject({
-    queries: ["directeur marketing"],
+    queries: ["marketing"],
     currentCompany: "123",
     count: 10,
     location: "France",

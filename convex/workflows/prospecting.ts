@@ -1612,7 +1612,11 @@ export const searchLinkedInInternal = internalAction({
                 ],
               };
             }
-            const result = await search([account.title], resolved.company.id);
+            // Verified employers let a shared French/English heading retrieve relevant roles before qualification.
+            const title = /\bmarketing\b/i.test(account.title)
+              ? "marketing"
+              : account.title;
+            const result = await search([title], resolved.company.id);
             return {
               ...result,
               queryStats: result.queryStats.map((item) => ({
