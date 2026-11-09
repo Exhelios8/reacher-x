@@ -1,5 +1,6 @@
 import { notifyWorkspacePlanLimitReached } from "../lib/planLimitNotificationCore";
 import {
+  getSiteAuditTopics,
   isAccountFirstDiscoveryEnabled,
   isFreshAccountResearchHint,
   parseAccountPeopleQuery,
@@ -356,8 +357,12 @@ export const prospectingWorkflow = workflow.define({
     const allSyntheticPosts = workspace.icps.flatMap(
       (icp: any) => icp.syntheticPosts || []
     );
+    const siteTopics = getSiteAuditTopics(
+      workspace.targetingSpec,
+      getCurrentUTCTimestamp()
+    );
 
-    if (allSyntheticPosts.length === 0) {
+    if (!siteTopics && allSyntheticPosts.length === 0) {
       onboardingIssueRaised = true;
       await step.runMutation(
         internal.workspaces.setOnboardingIssueStateInternal,
@@ -403,16 +408,18 @@ export const prospectingWorkflow = workflow.define({
     }
 
     // Step 4: Generate prospecting keywords from synthetic posts
-    const keywordsResult = await step.runAction(
-      internal.agents.internal.generateProspectingKeywordsAction,
-      {
-        workspaceId: args.workspaceId,
-        syntheticPosts: allSyntheticPosts,
-        businessContext: buildDiscoveryBusinessContext(workspace),
-        useCaseKey: workspace.useCaseKey,
-      },
-      { retry: runtimeConfig.retries.ai }
-    );
+    const keywordsResult = siteTopics
+      ? { success: true, prospectingKeywords: siteTopics, error: undefined }
+      : await step.runAction(
+          internal.agents.internal.generateProspectingKeywordsAction,
+          {
+            workspaceId: args.workspaceId,
+            syntheticPosts: allSyntheticPosts,
+            businessContext: buildDiscoveryBusinessContext(workspace),
+            useCaseKey: workspace.useCaseKey,
+          },
+          { retry: runtimeConfig.retries.ai }
+        );
 
     if (!keywordsResult.success || !keywordsResult.prospectingKeywords) {
       throw new Error(keywordsResult.error || "Failed to generate keywords");

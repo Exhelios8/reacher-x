@@ -183,6 +183,13 @@ export const qualificationCriterionResultValidator = v.object({
   employeeEvidence: v.optional(
     v.object({ sourceUrl: v.string(), quote: v.string() })
   ),
+  offerEvidence: v.optional(
+    v.object({
+      sourceUrl: v.string(),
+      quote: v.string(),
+      protectedOffer: v.optional(v.string()),
+    })
+  ),
   problemEvidence: v.optional(
     v.object({
       sourceId: v.string(),
@@ -1469,6 +1476,7 @@ export const qualificationSourceValidator = v.object({
 });
 
 export const qualificationRouteAssessmentValidator = v.object({
+  needsOfferVerification: v.optional(v.literal(true)),
   needsContactVerification: v.optional(v.literal(true)),
   route: v.union(
     v.literal("peer"),

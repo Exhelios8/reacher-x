@@ -7,6 +7,13 @@ export type WorkspaceTargetingSpec = Infer<
   typeof workspaceTargetingSpecValidator
 >;
 export type TargetingCriterion = WorkspaceTargetingSpec["criteria"][number];
+export function getNonCompetitorCriterion(spec?: WorkspaceTargetingSpec) {
+  return spec?.discoveryMode === "peer_or_site_audit"
+    ? spec.criteria.find(
+        (c) => c.id === "non_competitor" && c.kind === "required"
+      )
+    : undefined;
+}
 export function isRequiredProblemCriterion(
   criterion: TargetingCriterion | undefined
 ): boolean {
@@ -25,6 +32,20 @@ export function isRequiredProblemCriterion(
 export type DiscoveryStage = "strict" | "balanced" | "broad";
 export function validateOperatorTargeting(spec: WorkspaceTargetingSpec): void {
   spec.criteria.forEach(isRequiredProblemCriterion);
+  const nonCompetitor = getNonCompetitorCriterion(spec);
+  if (
+    nonCompetitor &&
+    (nonCompetitor.category !== "profile_fit" ||
+      nonCompetitor.evidence !== "profile" ||
+      !nonCompetitor.terms.some((term) => term.trim()) ||
+      !spec.searchHints.activityPhrases?.some((phrase) => phrase.trim()) ||
+      spec.criteria.indexOf(nonCompetitor) >= MAX_CRITERIA ||
+      spec.criteria.some((c) => c.id === "peer_fit") ||
+      spec.searchHints.peerOfferPhrases?.some((phrase) => phrase.trim()))
+  )
+    throw new Error(
+      "Non-competitor targeting requires protected offers, a required company profile criterion and site-only discovery."
+    );
   const bounded = spec.criteria.filter((c) => c.employeeRange);
   for (const criterion of bounded) {
     const { min, max } = criterion.employeeRange!;

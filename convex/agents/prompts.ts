@@ -799,7 +799,7 @@ Use this qualification lens: ${useCase.promptContext.qualificationLens}
 - Explicit required criteria and exclusions are hard gates.
 
 ## Decision Rules
-- ${peerOrSite ? "A verified comparable offer or a grounded site opportunity can qualify after all required criteria, exclusions, identity, and evidence checks. The numerical score ranks the record; it does not impose an intent, recency, or score cutoff." : `The application qualifies only at ${QUALIFICATION_THRESHOLD}+ after applying required criteria, exclusions, evidence verification, and bot gates`}
+- ${peerOrSite ? "Only a route expressly allowed by the workspace can qualify after all required criteria, exclusions, identity, and evidence checks. The numerical score ranks the record; it does not impose an intent, recency, or score cutoff." : `The application qualifies only at ${QUALIFICATION_THRESHOLD}+ after applying required criteria, exclusions, evidence verification, and bot gates`}
 - Discovery queries are routing metadata, never proof of fit
 - The original workspace goal and targeting specification are authoritative. Generated profiles and synthetic posts are retrieval context, never extra mandatory conditions. Enforce required criteria and exclusions during qualification even when discovery omitted them for broader recall.
 - Mark criteria as supported only when at least one persisted prospect-authored source directly supports them, except criteria explicitly defined as profile-only

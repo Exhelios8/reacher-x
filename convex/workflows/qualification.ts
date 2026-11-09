@@ -9,6 +9,7 @@ import { internalAction, internalMutation } from "../lib/functionBuilders";
 import { getQualificationPool } from "../lib/qualificationPool";
 import { previewQualificationPool } from "../lib/previewQualificationPool";
 import { QUALIFICATION_THRESHOLD } from "../lib/qualificationCore";
+import { isUsableQualificationVerification } from "../lib/qualificationEvidenceCore";
 import { evaluateQualificationWithExternalArticles } from "../lib/qualificationEvaluationCore";
 import {
   indexEvidencePosts,
@@ -558,15 +559,22 @@ export const qualificationWorkflow = workflow.define({
     }
 
     const isStillSetupPreview = currentProspect.origin === "setup_preview";
+    const needsOfferReview =
+      result.qualificationVerification.routeAssessment?.needsOfferVerification;
+    const evidenceValidationCompleted = isUsableQualificationVerification(
+      result.qualificationVerification
+    );
 
     // Log qualification activity
     await step.runMutation(internal.outreach.logActivity, {
       prospectId: args.prospectId,
       workspaceId: args.workspaceId,
       type: "qualified",
-      title: result.qualified
-        ? `Good match · ${result.score}% match`
-        : `Not a match · ${result.score}% match`,
+      title: needsOfferReview
+        ? "Employer offer needs review"
+        : result.qualified
+          ? `Good match · ${result.score}% match`
+          : `Not a match · ${result.score}% match`,
       description: result.qualificationVerification.routeAssessment
         ? (result.matchReasoning ?? result.reasoning)
         : result.qualified
@@ -586,18 +594,12 @@ export const qualificationWorkflow = workflow.define({
         status: result.status,
         score: result.score,
         discoveryQueries: result.qualificationVerification.discoveryQueries,
-        evidenceValidated:
-          result.qualificationVerification.status === "validated" &&
-          result.qualificationVerification.candidateSourceCount > 0,
+        evidenceValidated: evidenceValidationCompleted,
         qualificationSourceCount: result.qualificationSources.length,
         reasoning: result.reasoning,
       },
       eventKey: `qualification:${String(step.workflowId)}:completed`,
     });
-
-    const evidenceValidationCompleted =
-      result.qualificationVerification.status === "validated" &&
-      result.qualificationVerification.candidateSourceCount > 0;
 
     if (!isStillSetupPreview && evidenceValidationCompleted) {
       await step

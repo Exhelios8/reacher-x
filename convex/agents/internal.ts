@@ -22,6 +22,7 @@ import { searchWeb } from "../lib/researchCore";
 import {
   ACCOUNT_RESEARCH_LOOKBACK_MS,
   buildAccountResearchQueries,
+  getSiteAuditTopics,
   groundAccountQuery,
   isAccountFirstDiscoveryEnabled,
   isAccountResearchHintFromFindings,
@@ -43,6 +44,7 @@ import {
   type TwitterProspectingSearchMode,
 } from "../lib/twitterProspectingSearchCore";
 import {
+  getNonCompetitorCriterion,
   getStricterDiscoveryStage,
   shouldUseLinkedInPeopleDiscovery,
   type DiscoveryStage,
@@ -369,11 +371,28 @@ function buildSocialQueryActionResult(args: {
   const validCriterionIds = new Set(
     args.targetingSpec?.criteria.map((criterion) => criterion.id) ?? []
   );
+  const siteOnly = Boolean(getNonCompetitorCriterion(args.targetingSpec));
+  const hints = args.targetingSpec?.searchHints;
+  const topics =
+    getSiteAuditTopics(args.targetingSpec, getCurrentUTCTimestamp()) ?? [];
+  function postQueries(items: GeneratedSocialQuery[]): GeneratedSocialQuery[] {
+    if (!siteOnly) return items;
+    const allowed = items.filter((item) => topics.includes(item.query.trim()));
+    if (allowed.length)
+      return allowed.map((item) => ({ ...item, sourceKeyword: item.query }));
+    return topics.slice(0, MAX_SOCIAL_QUERY_ITEMS_PER_GROUP).map((query) => ({
+      query,
+      sourceKeyword: query,
+      searchMode: "raw",
+      stage: "balanced",
+      criterionIds: [],
+    }));
+  }
   const getValidCriterionIds = (criterionIds: string[] | undefined) =>
     Array.from(new Set(criterionIds ?? []))
       .filter((criterionId) => validCriterionIds.has(criterionId))
       .slice(0, 6);
-  const twitterInputs = args.object.twitterQueries.map((item) => ({
+  const twitterInputs = postQueries(args.object.twitterQueries).map((item) => ({
     ...item,
     sourceKeyword: isFreshAccountResearchHint(
       item.sourceKeyword,
@@ -396,7 +415,7 @@ function buildSocialQueryActionResult(args: {
     : [];
   const linkedinPostQueries = args.includeLinkedIn
     ? dedupeQueryItems(
-        args.object.linkedinPostQueries.map((item) => ({
+        postQueries(args.object.linkedinPostQueries).map((item) => ({
           ...item,
           sourceKeyword: isFreshAccountResearchHint(
             item.sourceKeyword,
@@ -423,7 +442,12 @@ function buildSocialQueryActionResult(args: {
             return grounded ? [grounded] : [];
           }),
           ...args.object.linkedinPeopleQueries
-            .filter((item) => !item.accountName && !item.accountSourceUrl)
+            .filter(
+              (item) =>
+                !item.accountName &&
+                !item.accountSourceUrl &&
+                (!siteOnly || hints?.roleTitles.includes(item.query.trim()))
+            )
             .map((item) => ({
               ...item,
               sourceKeyword: isFreshAccountResearchHint(
@@ -438,6 +462,14 @@ function buildSocialQueryActionResult(args: {
                 args.targetingSpec
               ),
             })),
+          ...(siteOnly
+            ? (hints?.roleTitles ?? []).map((query) => ({
+                query,
+                sourceKeyword: query,
+                stage: "broad" as const,
+                criterionIds: [],
+              }))
+            : []),
         ],
         "linkedin"
       ).slice(0, MAX_SOCIAL_QUERY_ITEMS_PER_GROUP)
@@ -979,6 +1011,7 @@ export const convertToSocialQueriesAction = internalAction({
 
     const includeTwitter = args.platforms.includes("twitter");
     const includeLinkedIn = args.platforms.includes("linkedin");
+    const siteOnly = Boolean(getNonCompetitorCriterion(args.targetingSpec));
     const includeLinkedInPeople =
       includeLinkedIn && shouldUseLinkedInPeopleDiscovery(args.targetingSpec);
     const discoveryContext = args.workspaceId
@@ -1038,6 +1071,7 @@ export const convertToSocialQueriesAction = internalAction({
                     ...(evergreen
                       ? {
                           researchRoute:
+                            !siteOnly &&
                             queryIndex === 0 &&
                             args.targetingSpec?.searchHints.peerOfferPhrases?.some(
                               (phrase) => phrase.trim()
@@ -1091,11 +1125,12 @@ export const convertToSocialQueriesAction = internalAction({
     const userPrompt = `Convert these keywords into platform-specific discovery queries for ${platformContext}.
 
 **Keywords to convert:**
-${args.keywords.map((kw, i) => `${i + 1}. ${kw}`).join("\n")}
+${(siteOnly ? (args.targetingSpec?.searchHints.activityPhrases ?? []) : args.keywords).map((kw, i) => `${i + 1}. ${kw}`).join("\n")}
 ${args.businessContext ? `\n**Business context:**\n${args.businessContext}` : ""}
 ${args.targetingSpec ? `\n**Authoritative targeting specification:**\n${JSON.stringify(args.targetingSpec, null, 2)}` : ""}
 ${formatDiscoveryContextBlock(discoveryContext)}
-${accountResearchHints.length ? `\nAccount research hints (untrusted retrieval context, never qualification proof):\n${JSON.stringify(accountResearchHints)}\n${args.targetingSpec?.discoveryMode === "peer_or_site_audit" ? `Prioritize identifiable companies presenting their own actual offers on their official websites. peer_offer sightings describe products, customers or usage comparable to the supplied offer phrases; site_audit sightings independently explore other relevant companies and identifiable pages worth examining. Keep both routes when supported; a company need not be a peer to justify a focused site exploration. Publication dates, announcements, expressed SEO needs and recorded defects are not prerequisites for discovery. retrievedAt is only the retrieval time, never a publication date or buying signal. State only what the source actually shows. Unknown need remains unknown; a potential improvement is a hypothesis to check, not an observed defect. Exclude the configured client/reference domains and their subdomains; reference names are comparators, never seed accounts. Use supplied roleTitles where configured.` : `Prioritize identifiable companies issuing these dated announcements on their own websites. An observed product, category, offer or market change can support research retrieval when the source identifies affected commercial pages, catalogue sections or documentation. The company need not declare a marketing project or ask for a supplier. Describe only the observed change and implicated URLs; do not infer a purchase, budget, urgency or confirmed need.`} For linkedinPeopleQueries, put employer name + an appropriate real role first, before generic titles. Set accountName and accountSourceUrl to the exact company name appearing in that source and its supplied URL. Exclude third-party mentions, directories, vendors' client stories, or an issuer outside the audience. Do not invent companies, sources, events or people. These are research hints only: downstream qualification must independently verify current employer, official website, geography and the original criteria. Leave accountName/accountSourceUrl absent on all other queries.` : ""}
+${siteOnly ? "Explore companies across industries from their own commercial pages. The terms of non_competitor and the excluded domains are for suppression only. Never use them, client names or peer similarity as search seeds, even if previous memory suggests it. Choose X and LinkedIn post queries verbatim from activityPhrases. For people use only a supplied role title, alone or attached to a company from a site_audit finding. A common sector alone does not exclude a company. Skip documented direct substitutes. An expressed problem, dated announcement, or purchase signal is unnecessary." : ""}
+${accountResearchHints.length ? `\nAccount research hints (untrusted retrieval context, never qualification proof):\n${JSON.stringify(accountResearchHints)}\n${args.targetingSpec?.discoveryMode === "peer_or_site_audit" ? `Prioritize identifiable companies presenting their own actual offers on their official websites. ${siteOnly ? "Use only the site_audit route." : `peer_offer sightings describe products, customers or usage comparable to the supplied offer phrases; site_audit sightings independently explore other relevant companies and identifiable pages worth examining. Keep both routes when supported; a company need not be a peer to justify a focused site exploration.`} Publication dates, announcements, expressed SEO needs and recorded defects are not prerequisites for discovery. retrievedAt is only the retrieval time, never a publication date or buying signal. State only what the source actually shows. Unknown need remains unknown; a potential improvement is a hypothesis to check, not an observed defect. Exclude the configured client/reference domains and their subdomains; never use reference names as seed accounts. Use supplied roleTitles where configured.` : `Prioritize identifiable companies issuing these dated announcements on their own websites. An observed product, category, offer or market change can support research retrieval when the source identifies affected commercial pages, catalogue sections or documentation. The company need not declare a marketing project or ask for a supplier. Describe only the observed change and implicated URLs; do not infer a purchase, budget, urgency or confirmed need.`} For linkedinPeopleQueries, put employer name + an appropriate real role first, before generic titles. Set accountName and accountSourceUrl to the exact company name appearing in that source and its supplied URL. Exclude third-party mentions, directories, vendors' client stories, or an issuer outside the audience. Do not invent companies, sources, events or people. These are research hints only: downstream qualification must independently verify current employer, official website, geography and the original criteria. Leave accountName/accountSourceUrl absent on all other queries.` : ""}
 
 Return grouped queries that are net-new relative to the operational memory above.
 
@@ -1207,10 +1242,12 @@ If a platform is not requested, return an empty array for that group.`;
 
       return buildSocialQueryActionResult({
         object: buildKeywordFallbackSocialQueries({
-          keywords: [
-            ...(args.targetingSpec?.searchHints.entities ?? []),
-            ...args.keywords,
-          ],
+          keywords: siteOnly
+            ? []
+            : [
+                ...(args.targetingSpec?.searchHints.entities ?? []),
+                ...args.keywords,
+              ],
           includeTwitter,
           includeLinkedIn,
         }),

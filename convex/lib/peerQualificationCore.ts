@@ -5,6 +5,7 @@ import type {
 } from "./qualificationEvidenceCore";
 import { sameQualificationWebsiteHost } from "./qualificationEvidenceCore";
 import {
+  getNonCompetitorCriterion,
   isExcludedCompanyDomain,
   type WorkspaceTargetingSpec,
 } from "./targetingSpecCore";
@@ -32,6 +33,109 @@ export function noPeerRoute(rationale: string): Route {
   return { route: "none", needStatus: "unknown", rationale };
 }
 
+function verifiedEmployerWebsite(
+  employer: Record<string, unknown> | undefined,
+  profile: Record<string, unknown>
+) {
+  if (
+    employer &&
+    isRecord(employer.company) &&
+    typeof employer.companyId === "string" &&
+    /^[1-9]\d*$/.test(employer.companyId) &&
+    typeof profile.urn === "string" &&
+    profile.urn &&
+    employer.personUrn === profile.urn &&
+    typeof profile.url === "string" &&
+    /^https:\/\/www\.linkedin\.com\/in\/[^/?#]+\/?$/.test(profile.url) &&
+    employer.relationshipSourceUrl === profile.url &&
+    typeof employer.company.website === "string" &&
+    isPublicHttpUrl(employer.company.website)
+  )
+    return employer.company.website;
+}
+
+function findReviewedPassage(
+  employer: Record<string, unknown>,
+  website: string,
+  sourceUrl: string,
+  quote: string,
+  now: number
+) {
+  if (
+    !quote.trim() ||
+    !isPublicHttpUrl(sourceUrl) ||
+    !sameQualificationWebsiteHost(sourceUrl, website)
+  )
+    return;
+  const pages = Array.isArray(employer.reviewedPages)
+    ? employer.reviewedPages
+    : [employer.reviewedPage];
+  return pages.filter(isRecord).find((page) => {
+    const checked = Date.parse(
+      typeof page.observedAt === "string" ? page.observedAt : ""
+    );
+    return (
+      page.url === sourceUrl &&
+      page.finalUrl === sourceUrl &&
+      page.httpStatus === 200 &&
+      page.provenance === "native_http" &&
+      checked <= now &&
+      now - checked <= 24 * 60 * 60 * 1000 &&
+      typeof page.text === "string" &&
+      page.text.includes(quote)
+    );
+  });
+}
+
+/** A semantic assessment must cite the verified employer's offer, independently of the site-audit angle. */
+export function verifyNonCompetitor(args: {
+  result: QualificationCriterionResult;
+  offer?: { sourceUrl: string; quote: string; protectedOffer: string };
+  protectedOffers: string[];
+  employer?: Record<string, unknown>;
+  profile: Record<string, unknown>;
+  now: number;
+}): QualificationCriterionResult {
+  const { result, offer, employer, now } = args;
+  const website = verifiedEmployerWebsite(employer, args.profile);
+  const cited =
+    employer &&
+    website &&
+    offer &&
+    findReviewedPassage(employer, website, offer.sourceUrl, offer.quote, now);
+  const protectedOffer = args.protectedOffers.find(
+    (term) => term === offer?.protectedOffer
+  );
+  const offerEvidence =
+    cited && offer
+      ? {
+          sourceUrl: offer.sourceUrl,
+          quote: offer.quote,
+          ...(protectedOffer && { protectedOffer }),
+        }
+      : undefined;
+  if (
+    !offerEvidence ||
+    !result.rationale.trim() ||
+    (result.verdict === "not_matched" && !protectedOffer) ||
+    (result.verdict === "matched" && offer?.protectedOffer.trim()) ||
+    !["matched", "not_matched"].includes(result.verdict)
+  ) {
+    return {
+      criterionId: result.criterionId,
+      verdict: "unknown",
+      confidence: 0,
+      sourceIds: [],
+      rationale:
+        cited && result.verdict === "unknown" && result.rationale.trim()
+          ? `Offer review needed: ${result.rationale}`
+          : "Offer review needed: verify what the employer sells and whether buyers could use it in place of a protected offer.",
+      ...(offerEvidence && { offerEvidence }),
+    };
+  }
+  return { ...result, sourceIds: [], offerEvidence };
+}
+
 /** Route evidence comes from the verified current employer context, never the raw import or search hint. */
 export function verifyPeerRoute(args: {
   proposal?: PeerRouteProposal;
@@ -43,51 +147,62 @@ export function verifyPeerRoute(args: {
   now: number;
 }): Route {
   const { proposal, employer, profile, sources } = args;
+  const nonCompetitor = getNonCompetitorCriterion(args.spec);
+  const website = verifiedEmployerWebsite(employer, profile);
   const absent = noPeerRoute(
-    "The available evidence does not establish a comparable offer or a specific site opportunity."
+    nonCompetitor
+      ? "A specific opportunity on the employer's site has not been verified."
+      : "The available evidence does not establish a comparable offer or a specific site opportunity."
   );
+  const verifiedRole = sources.some(
+    (s) =>
+      s.evidenceKind === "profile" &&
+      s.authorId === profile.urn &&
+      s.sourceUrl === profile.url &&
+      args.criteria.some(
+        (c) =>
+          c.criterionId === "role" &&
+          c.verdict === "matched" &&
+          c.sourceIds.includes(s.sourceId)
+      )
+  );
+  const researchOnly = {
+    ...noPeerRoute(
+      "Research only: current contact and employer website have not been independently verified."
+    ),
+    needsContactVerification: true as const,
+  };
   if (
     !employer ||
     !isRecord(employer.company) ||
-    typeof employer.companyId !== "string" ||
-    !/^[1-9]\d*$/.test(employer.companyId) ||
-    typeof profile.urn !== "string" ||
-    !profile.urn ||
-    employer.personUrn !== profile.urn ||
-    typeof profile.url !== "string" ||
-    !/^https:\/\/www\.linkedin\.com\/in\/[^/?#]+\/?$/.test(profile.url) ||
-    employer.relationshipSourceUrl !== profile.url ||
-    typeof employer.company.website !== "string" ||
-    !isPublicHttpUrl(employer.company.website) ||
-    !sources.some(
-      (s) =>
-        s.evidenceKind === "profile" &&
-        s.authorId === profile.urn &&
-        s.sourceUrl === profile.url &&
-        args.criteria.some(
-          (c) =>
-            c.criterionId === "role" &&
-            c.verdict === "matched" &&
-            c.sourceIds.includes(s.sourceId)
-        )
-    )
-  ) {
-    return {
-      ...noPeerRoute(
-        "Research only: current contact and employer website have not been independently verified."
-      ),
-      needsContactVerification: true,
-    };
-  }
+    !website ||
+    (!nonCompetitor && !verifiedRole)
+  )
+    return researchOnly;
   if (
     isExcludedCompanyDomain(
-      employer.company.website,
+      website,
       args.spec.searchHints.excludedCompanyDomains
     )
   )
     return noPeerRoute(
       "The verified employer domain is a reference or excluded account."
     );
+  if (nonCompetitor) {
+    const assessment = args.criteria.find(
+      (c) => c.criterionId === nonCompetitor.id
+    );
+    if (assessment?.verdict === "not_matched")
+      return noPeerRoute(assessment.rationale);
+    if (assessment?.verdict !== "matched")
+      return {
+        ...noPeerRoute(
+          assessment?.rationale ?? "The employer's offer needs review."
+        ),
+        needsOfferVerification: true,
+      };
+  }
+  if (!verifiedRole) return researchOnly;
   if (
     !proposal ||
     proposal.route === "none" ||
@@ -100,35 +215,24 @@ export function verifyPeerRoute(args: {
     return absent;
   if (
     proposal.route === "peer" &&
-    !args.criteria.some(
-      (c) => c.criterionId === "peer_fit" && c.verdict === "matched"
-    )
+    (nonCompetitor ||
+      !args.criteria.some(
+        (c) => c.criterionId === "peer_fit" && c.verdict === "matched"
+      ))
   )
     return absent;
 
   const officialHost = sameQualificationWebsiteHost(
     proposal.sourceUrl,
-    employer.company.website
+    website
   );
-  const reviews = Array.isArray(employer.reviewedPages)
-    ? employer.reviewedPages
-    : [employer.reviewedPage];
-  const reviewedPage = reviews.filter(isRecord).find((page) => {
-    const checked = Date.parse(
-      typeof page.observedAt === "string" ? page.observedAt : ""
-    );
-    return (
-      officialHost &&
-      page.url === proposal.sourceUrl &&
-      page.finalUrl === proposal.sourceUrl &&
-      page.httpStatus === 200 &&
-      page.provenance === "native_http" &&
-      checked <= args.now &&
-      args.now - checked <= 24 * 60 * 60 * 1000 &&
-      typeof page.text === "string" &&
-      page.text.includes(proposal.sourceQuote)
-    );
-  });
+  const reviewedPage = findReviewedPassage(
+    employer,
+    website,
+    proposal.sourceUrl,
+    proposal.sourceQuote,
+    args.now
+  );
   const firstParty =
     officialHost &&
     sources.find(

@@ -3,6 +3,7 @@ import {
   ACCOUNT_RESEARCH_LOOKBACK_MS,
   buildAccountResearchQueries,
   groundAccountQuery,
+  getSiteAuditTopics,
   isAccountFirstDiscoveryEnabled,
   isAccountResearchHintFromFindings,
   isFreshAccountResearchHint,
@@ -14,6 +15,49 @@ import {
 import { buildLegacyWorkspaceTargetingSpec } from "./targetingSpecCore";
 
 const now = Date.parse("2026-11-05T12:00:00Z");
+test("site-only queries rotate across every supplied industry without using protected offers or old seeds", () => {
+  const spec = buildLegacyWorkspaceTargetingSpec({
+    description: "Business websites",
+    profiles: [],
+  });
+  spec.discoveryMode = "peer_or_site_audit";
+  spec.criteria.push({
+    id: "non_competitor",
+    label: "Conflict",
+    description: "Distinct offer",
+    kind: "required",
+    category: "profile_fit",
+    evidence: "profile",
+    weight: 5,
+    terms: ["Protected platform"],
+  });
+  const topics = [
+    "tooling",
+    "calibration",
+    "insurance",
+    "ventilation",
+    "packaging",
+    "shipping",
+  ];
+  spec.searchHints.activityPhrases = topics;
+  const used = new Set<string>();
+  const seeds = new Set<string>();
+  for (let cycle = 0; cycle < topics.length; cycle++) {
+    const timestamp = now + cycle * 300_000;
+    seeds.add(getSiteAuditTopics(spec, timestamp)![0]);
+    const queries = buildAccountResearchQueries({
+      targetingSpec: spec,
+      keywords: ["Protected platform"],
+      now: timestamp,
+    });
+    expect(new Set(queries).size).toBe(2);
+    queries.forEach((query) => used.add(query));
+  }
+  expect(seeds).toEqual(new Set(topics));
+  expect(used).toEqual(
+    new Set(topics.map((topic) => topic + " official website"))
+  );
+});
 const finding = {
   title: "Acme ouvre une nouvelle usine",
   url: "https://www.acme.fr/actualites/usine",

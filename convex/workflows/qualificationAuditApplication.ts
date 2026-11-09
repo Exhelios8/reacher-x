@@ -428,7 +428,11 @@ export const processApplicationBatchInternal = internalAction({
           prospectId: entry.prospect._id,
           namespace: "verified_wins",
         });
-        if (entry.item.qualificationSources.length > 0) {
+        if (
+          entry.item.qualificationSources.length > 0 &&
+          !entry.item.qualificationVerification?.routeAssessment
+            ?.needsOfferVerification
+        ) {
           await ctx.runAction(
             internal.memory.indexWorkspaceProspectSummaryInternal,
             {

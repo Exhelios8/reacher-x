@@ -8,6 +8,7 @@ import { verifyEmployeeRange } from "./employeeRangeCore";
 import {
   noPeerRoute,
   peerRouteSchema,
+  verifyNonCompetitor,
   verifyPeerRoute,
   type PeerRouteProposal,
 } from "./peerQualificationCore";
@@ -57,6 +58,7 @@ import {
   ACCOUNT_SOURCE_UNAVAILABLE,
 } from "./qualificationFailureCore";
 import {
+  getNonCompetitorCriterion,
   isRequiredProblemCriterion,
   type WorkspaceTargetingSpec,
 } from "./targetingSpecCore";
@@ -174,8 +176,14 @@ const employeeStatementSchema = z.object({
   sourceUrl: z.string().trim().max(2048),
   quote: z.string().trim().max(500),
 });
+const offerStatementSchema = z.object({
+  sourceUrl: z.string().trim().max(2048),
+  quote: z.string().trim().max(1000),
+  protectedOffer: z.string().trim().max(500),
+});
 type EvaluatorResponse = z.infer<typeof llmQualificationSchema> & {
   employeeStatement?: z.infer<typeof employeeStatementSchema>;
+  offerStatement?: z.infer<typeof offerStatementSchema>;
   problemEvidence?: z.infer<typeof problemAssessmentSchema>;
   routeAssessment?: PeerRouteProposal;
 };
@@ -422,6 +430,7 @@ export async function qualifyProspectCore(
     isRequiredProblemCriterion
   );
   const peerOrSite = targetingSpec.discoveryMode === "peer_or_site_audit";
+  const nonCompetitor = getNonCompetitorCriterion(targetingSpec);
   const employeeCriterion = targetingSpec.criteria.find(
     (criterion) => criterion.employeeRange
   );
@@ -575,7 +584,7 @@ First complete goalAssessment: separate factual audience matches from usefulness
 
 ${requiresProblemEvidence ? `A third eligible primary source is observed_site_problem: ReacherX verified an actual link on a live official source page to a commercial/docs destination returning HTTP 404/410 twice, within 14 days. Use the recorded status fact for problemQuote and the destination URL or link label for affectedPageQuote; copy both verbatim from the machine record. Assess whether that exact defect is an unresolved problem the offered service can remedy. Use observedAt, not a publication date. Never call the measurement a statement by the person/company, and set attributedToEmployer=false. It can support only the marked need, never another criterion, a goal contradiction or individual intent.` : ""}
 
-${peerOrSite ? `This workspace has two independent acquisition paths. A documented comparable offer sold to the relevant buyer/use qualifies even with existing SEO, successful work, unknown purchasing intent and no personal posts. Do not infer a peer from a customer, supplier, partner, technology user or shared industry alone. For peer require peer_fit=matched and quote what this employer actually sells. For another company, use observed_problem only for a verified current HTTP finding, testable_opportunity for a specific plausible improvement on an inspected page, or exploration for a justified question about specific visible products, documentation, services or content worth discussing. A healthy site can support exploration. A generic title, URL, news item or vague "could improve SEO" is insufficient. Do not claim a defect, urgency, demand, budget or intent from a hypothesis. Use need=unknown when appropriate. For routeAssessment give the sourceUrl and verbatim sourceQuote. Explain the buyer/offer similarity or site observation in rationale and the work or test in offerOrRemedy. For 404/410 quote the measured HTTP status and cite the live linking page. Use verified employer reviewedPages (HTTP 200 and observedAt), the official employer profile description (company sourceUrl), or separately verified company sources. A verified contact profile describing a relevant role supports qualification even without a personal publication. Return none and empty missing fields when neither route is grounded. Keep criterion verdicts and numerical scores honest, independently of route. Verified employer evidence: ${JSON.stringify(employerEvidence ?? null)}` : ""}
+${peerOrSite ? `${nonCompetitor ? `Only a documented site opportunity can qualify. Never return the peer route. The non_competitor criterion compares the employer’s actual offer to the protected offers listed in its terms. A direct substitute solves the same core job for the same buyer and could realistically replace a protected offer in the same purchase. Mark not_matched only on evidence, naming the protected offer and explaining that substitution. A shared industry, technology or audience alone is insufficient. A clearly distinct offer can be marked matched without seven negative proofs. For plausible unresolved overlap or an unidentified offer use unknown. For offerStatement cite a verbatim description of what this employer itself sells from its reviewed official website. Use protectedOffer equal to the exact applicable criterion term when a conflict is evidenced, otherwise an empty string. A conflict overrides every site route. For the site route,` : `This workspace has two independent acquisition paths. A documented comparable offer sold to the relevant buyer/use qualifies even with existing SEO, successful work, unknown purchasing intent and no personal posts. Do not infer a peer from a customer, supplier, partner, technology user or shared industry alone. For peer require peer_fit=matched and quote what this employer actually sells. For another company,`} use observed_problem only for a verified current HTTP finding, testable_opportunity for a specific plausible improvement on an inspected page, or exploration for a justified question about specific visible products, documentation, services or content worth discussing. A healthy site can support exploration. A generic title, URL, news item or vague "could improve SEO" is insufficient. Do not claim a defect, urgency, demand, budget or intent from a hypothesis. Use need=unknown when appropriate. For routeAssessment give the sourceUrl and verbatim sourceQuote. Explain the chosen route in rationale and the work or test in offerOrRemedy. For 404/410 quote the measured HTTP status and cite the live linking page. Use verified employer reviewedPages (HTTP 200 and observedAt), the official employer profile description (company sourceUrl), or separately verified company sources. A verified contact profile describing a relevant role supports qualification even without a personal publication. Return none and empty missing fields when no permitted route is grounded. Keep criterion verdicts and numerical scores honest, independently of route. Verified employer evidence: ${JSON.stringify(employerEvidence ?? null)}` : ""}
 
 Return exactly one criterionResults entry for every targeting criterion ID.
 ${employeeCriterion ? `For employeeStatement return the official URL and exact full present-tense sentence only if a reviewedPage establishes this verified employer's own current total salaried headcount. Exclude historical counts, projections, testimonials, team rosters, subsidiary/site/division counts, clients and associated LinkedIn member counts. Use empty strings if no such sentence exists. The company's declared staffCountRange is assessed separately. ${peerOrSite ? "" : JSON.stringify(employerEvidence ?? null)}` : ""}
@@ -618,11 +627,15 @@ ${similarDisqualifiedCases?.join("\n") || "None"}
 Evaluate this prospect against the ICP.`;
 
   try {
-    const schema = peerOrSite
-      ? llmPeerQualificationSchema
-      : requiresProblemEvidence
-        ? llmQualificationWithProblemSchema
-        : llmQualificationSchema;
+    const schema = nonCompetitor
+      ? llmPeerQualificationSchema.extend({
+          offerStatement: offerStatementSchema,
+        })
+      : peerOrSite
+        ? llmPeerQualificationSchema
+        : requiresProblemEvidence
+          ? llmQualificationWithProblemSchema
+          : llmQualificationSchema;
     const generateQualificationCandidate = async (repairInstruction?: string) =>
       await robustGenerateObject<EvaluatorResponse>({
         operation: "qualifyProspect",
@@ -680,6 +693,22 @@ Evaluate this prospect against the ICP.`;
         const criterion = targetingSpec.criteria.find(
           (c) => c.id === result.criterionId
         );
+        if (nonCompetitor && criterion === nonCompetitor) {
+          return verifyNonCompetitor({
+            result: {
+              criterionId: criterion.id,
+              verdict: result.verdict,
+              confidence: result.confidence,
+              rationale: result.rationale,
+              sourceIds: [],
+            },
+            offer: object.offerStatement,
+            protectedOffers: criterion.terms,
+            employer: platform === "linkedin" ? employerEvidence : undefined,
+            profile: profileData,
+            now,
+          });
+        }
         if (isRequiredProblemCriterion(criterion)) {
           const citedProof =
             object.problemEvidence &&
@@ -794,6 +823,13 @@ Evaluate this prospect against the ICP.`;
       threshold: QUALIFICATION_THRESHOLD,
     });
     const scoreBreakdown = targetingScore.breakdown;
+    const unmetNonCompetitor =
+      nonCompetitor &&
+      criterionResults.find(
+        (result) =>
+          result.criterionId === nonCompetitor.id &&
+          result.verdict !== "matched"
+      );
     const route = peerOrSite
       ? verifyPeerRoute({
           proposal: object.routeAssessment,
@@ -820,6 +856,9 @@ Evaluate this prospect against the ICP.`;
         !unprovenProblem.problemEvidence &&
         params.problemSourceUnavailable) ||
         (route?.route === "none" &&
+          !(
+            route.needsOfferVerification && unmetNonCompetitor?.offerEvidence
+          ) &&
           employerEvidence?.siteProblemFetchRetryable === true)) &&
       !goalConflict &&
       !object.isLikelyBot
@@ -906,13 +945,14 @@ Evaluate this prospect against the ICP.`;
         (finalQualified ||
           (!goalConflict && !targetingScore.hardFailureCriterionIds.length))
           ? route.rationale
-          : (unresolvedSize?.rationale ??
+          : (unmetNonCompetitor?.rationale ??
+            unresolvedSize?.rationale ??
             unprovenProblem?.rationale ??
             object.reasoning),
       reasoning: goalConflict
         ? `${object.reasoning} Evidence contradicts the user's contact goal: ${object.goalAssessment.rationale} Quote: ${object.goalAssessment.conflictingQuote}`
         : targetingScore.hardFailureCriterionIds.length > 0
-          ? `${unresolvedSize?.rationale ?? object.reasoning} Hard qualification gates not satisfied: ${targetingScore.hardFailureCriterionIds.join(", ")}.`
+          ? `${unmetNonCompetitor?.rationale ?? unresolvedSize?.rationale ?? object.reasoning} Hard qualification gates not satisfied: ${targetingScore.hardFailureCriterionIds.join(", ")}.`
           : object.reasoning,
       qualifiedAt: finalQualified ? now : undefined,
     };

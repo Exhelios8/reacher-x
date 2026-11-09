@@ -1,4 +1,5 @@
 import {
+  getNonCompetitorCriterion,
   isExcludedCompanyDomain,
   type WorkspaceTargetingSpec,
 } from "./targetingSpecCore";
@@ -34,6 +35,18 @@ export function isAccountFirstDiscoveryEnabled(workspaceId?: string): boolean {
   );
 }
 
+export function getSiteAuditTopics(
+  spec: WorkspaceTargetingSpec | undefined,
+  now: number
+) {
+  if (!getNonCompetitorCriterion(spec)) return undefined;
+  const topics = spec?.searchHints.activityPhrases ?? [];
+  if (!topics.length) return [];
+  const offset =
+    (Math.floor(now / 300_000) + Math.floor(now / 86_400_000)) % topics.length;
+  return [...topics.slice(offset), ...topics.slice(0, offset)];
+}
+
 export function buildAccountResearchQueries(args: {
   targetingSpec?: WorkspaceTargetingSpec;
   keywords: string[];
@@ -41,7 +54,10 @@ export function buildAccountResearchQueries(args: {
 }): string[] {
   const spec = args.targetingSpec;
   const evergreen = spec?.discoveryMode === "peer_or_site_audit";
-  const suppliedActivities = spec?.searchHints.activityPhrases ?? [];
+  const siteTopics = getSiteAuditTopics(spec, args.now);
+  const siteOnly = Boolean(siteTopics);
+  const suppliedActivities =
+    siteTopics ?? spec?.searchHints.activityPhrases ?? [];
   const intentTerms =
     spec?.criteria
       .filter(
@@ -63,28 +79,23 @@ export function buildAccountResearchQueries(args: {
         .filter(Boolean)
     ),
   ];
-  const offers = evergreen
-    ? (spec.searchHints.peerOfferPhrases ?? [])
-        .map((phrase) => phrase.replace(/\s+/g, " ").trim().slice(0, 160))
-        .filter(Boolean)
-    : [];
+  const offers =
+    evergreen && !siteOnly
+      ? (spec.searchHints.peerOfferPhrases ?? [])
+          .map((phrase) => phrase.replace(/\s+/g, " ").trim().slice(0, 160))
+          .filter(Boolean)
+      : [];
   if (!phrases.length && !offers.length) return [];
   const location =
     spec?.searchHints.locations[0] ??
     spec?.searchFilters?.linkedinPeople.location ??
     "";
-  const sourceTerms =
-    spec?.searchHints.languageCodes?.[0] === "fr"
-      ? "actualités entreprise site officiel"
-      : "company official news";
+  const french = spec?.searchHints.languageCodes?.[0] === "fr";
+  const officialSite = french ? "site officiel" : "official website";
   const rotation =
     parseInt(createStableHash(args.keywords.join("\n")), 16) +
     Math.floor(args.now / (5 * 60 * 1000));
-  if (evergreen) {
-    const officialSite =
-      spec.searchHints.languageCodes?.[0] === "fr"
-        ? "site officiel"
-        : "official website";
+  if (evergreen && !siteOnly) {
     return [
       offers[rotation % offers.length],
       phrases[rotation % phrases.length],
@@ -96,14 +107,18 @@ export function buildAccountResearchQueries(args: {
       .filter((query, index, queries) => queries.indexOf(query) === index);
   }
   // Rotate supplied work/page topics across cycles without adding a model call or durable state.
-  const offset = rotation % phrases.length;
+  const offset = siteOnly ? 0 : rotation % phrases.length;
   return Array.from({ length: Math.min(2, phrases.length) }, (_, index) =>
     [
       phrases[
         (offset + index * Math.ceil(phrases.length / 2)) % phrases.length
       ],
       location,
-      sourceTerms,
+      siteOnly
+        ? officialSite
+        : french
+          ? "actualités entreprise site officiel"
+          : "company official news",
     ]
       .filter(Boolean)
       .join(" ")

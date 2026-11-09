@@ -4,7 +4,10 @@ import {
   type QualificationCoreParams,
 } from "./qualificationCore";
 import { evaluateQualificationWithExternalArticles } from "./qualificationEvaluationCore";
-import { prepareQualificationCandidates } from "./qualificationEvidenceCore";
+import {
+  prepareQualificationCandidates,
+  isUsableQualificationVerification,
+} from "./qualificationEvidenceCore";
 import type { ActionCtx } from "../_generated/server";
 import type { Id } from "../_generated/dataModel";
 import { robustGenerateObject } from "./ai";
@@ -126,11 +129,35 @@ async function evaluate(
     measured?: boolean;
     nativeContext?: ActionCtx;
     xOnly?: boolean;
+    conflict?: {
+      verdict: "matched" | "not_matched" | "unknown";
+      quote?: string;
+      protectedOffer?: string;
+      sourceUrl?: string;
+      employerOffer?: string;
+    };
     size?: { range?: string; statement?: string; pageText?: string };
   } = {}
 ) {
   const route = opts.route ?? "peer";
-  const criteria = [...spec.criteria];
+  const routeQuote = opts.conflict
+    ? "Demandez la fiche de sélection de notre gamme."
+    : quote;
+  const protectedOffer = "Document management for legal departments";
+  const criteria = spec.criteria.filter(
+    (c) => !opts.conflict || c.id !== "peer_fit"
+  );
+  if (opts.conflict)
+    criteria.push({
+      id: "non_competitor",
+      label: "Protected offers",
+      description: "Exclude direct substitutes.",
+      terms: [protectedOffer],
+      weight: 5,
+      category: "profile_fit",
+      evidence: "profile",
+      kind: "required",
+    });
   if (opts.size) criteria.push(sizeCriterion);
   const candidateId = `profile:linkedin:${profile.urn}`;
   const measuredQuote = "Observed HTTP 404, confirmed by two GET requests.";
@@ -186,6 +213,15 @@ async function evaluate(
       isLikelyBot: false,
       botFlags: [],
       reasoning: "Evaluate the evidence available.",
+      ...(opts.conflict && {
+        offerStatement: {
+          sourceUrl: opts.conflict.sourceUrl ?? siteUrl,
+          quote: opts.conflict.quote ?? quote,
+          protectedOffer:
+            opts.conflict.protectedOffer ??
+            (opts.conflict.verdict === "not_matched" ? protectedOffer : ""),
+        },
+      }),
       ...(opts.size
         ? {
             employeeStatement: {
@@ -201,7 +237,7 @@ async function evaluate(
           ? "Invented quote"
           : opts.measured
             ? measuredQuote
-            : quote,
+            : routeQuote,
       },
       evidenceDecisions: [
         ...(measuredCandidate
@@ -223,7 +259,8 @@ async function evaluate(
       ],
       criterionResults: criteria.map((c) => ({
         criterionId: c.id,
-        verdict: verdict(c.id),
+        verdict:
+          c.id === "non_competitor" ? opts.conflict!.verdict : verdict(c.id),
         confidence: 1,
         rationale: "Test fixture",
         candidateIds: c.id === "role" && !opts.uncitedRole ? [candidateId] : [],
@@ -266,7 +303,14 @@ async function evaluate(
           reviewedPages: [
             {
               ...page,
-              text: opts.size?.pageText ?? page.text,
+              text: [
+                opts.size?.pageText ?? (opts.conflict ? routeQuote : page.text),
+                opts.conflict
+                  ? (opts.conflict.employerOffer ?? quote)
+                  : undefined,
+              ]
+                .filter(Boolean)
+                .join(" "),
               observedAt: opts.stale ? "2024-01-01" : now,
             },
           ],
@@ -483,6 +527,101 @@ test("a fabricated payroll citation cannot qualify a small employer", async () =
     ).qualified
   ).toBe(false);
 });
+
+test("site-only qualification needs a distinct evidenced offer and an independent site angle", async () => {
+  const tooling = "Nous fabriquons des machines-outils à commande numérique.";
+  const conflict = {
+    verdict: "matched" as const,
+    quote: tooling,
+    employerOffer: tooling,
+  };
+  const result = await evaluate({
+    route: "exploration",
+    conflict,
+    size: { range: "11-50 employees" },
+  });
+  expect(result).toMatchObject({
+    qualified: true,
+    qualificationVerification: {
+      routeAssessment: { route: "exploration", needStatus: "unknown" },
+    },
+  });
+  expect(result.criterionResults).toContainEqual(
+    expect.objectContaining({
+      criterionId: "non_competitor",
+      verdict: "matched",
+      offerEvidence: { sourceUrl: siteUrl, quote: tooling },
+    })
+  );
+  for (const gates of [
+    { route: "peer" as const },
+    { size: { range: "201-500 employees" } },
+    { noRole: true },
+    { reference: true },
+  ]) {
+    expect(
+      (await evaluate({ route: "exploration", conflict, ...gates })).qualified
+    ).toBe(false);
+  }
+});
+
+test("a cited substitute overrides even a confirmed technical problem", async () => {
+  const result = await evaluate({
+    route: "observed_problem",
+    measured: true,
+    conflict: { verdict: "not_matched" },
+  });
+  expect(result).toMatchObject({
+    qualified: false,
+    status: "disqualified",
+    qualificationVerification: { routeAssessment: { route: "none" } },
+  });
+  expect(result.criterionResults).toContainEqual(
+    expect.objectContaining({
+      criterionId: "non_competitor",
+      verdict: "not_matched",
+      offerEvidence: {
+        sourceUrl: siteUrl,
+        quote,
+        protectedOffer: "Document management for legal departments",
+      },
+    })
+  );
+  expect(
+    result.qualificationVerification.routeAssessment?.needsOfferVerification
+  ).toBeUndefined();
+});
+
+test.each([
+  { verdict: "unknown" as const },
+  { verdict: "matched" as const, quote: "Invented offer" },
+  { verdict: "matched" as const, sourceUrl: "https://other.example/solutions" },
+  {
+    verdict: "not_matched" as const,
+    protectedOffer: "Not in the protected list",
+  },
+])(
+  "unresolved or unsupported competition judgment is withheld for review: %j",
+  async (conflict) => {
+    const result = await evaluate({ route: "exploration", conflict });
+    expect(result).toMatchObject({
+      qualified: false,
+      qualificationVerification: {
+        routeAssessment: { route: "none", needsOfferVerification: true },
+      },
+    });
+    expect(result.criterionResults).toContainEqual(
+      expect.objectContaining({
+        criterionId: "non_competitor",
+        verdict: "unknown",
+      })
+    );
+    expect(result.matchReasoning).toMatch(/offer review/i);
+    expect(
+      isUsableQualificationVerification(result.qualificationVerification)
+    ).toBe(false);
+  }
+);
 test.each([
   "In 2019, We have 8 employees.",
   "We have 8 employees in our Paris sales team.",

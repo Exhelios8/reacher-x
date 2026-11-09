@@ -606,6 +606,7 @@ export function isUsableQualificationVerification(
 ): boolean {
   return (
     verification?.status === "validated" &&
+    !verification.routeAssessment?.needsOfferVerification &&
     verification.candidateSourceCount > 0
   );
 }

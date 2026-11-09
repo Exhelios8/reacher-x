@@ -1118,6 +1118,8 @@ export const filterCurrentLearningEntriesInternal = internalQuery({
           prospect.origin !== "setup_preview" &&
           expected &&
           prospect.qualificationStatus === expected &&
+          !prospect.qualificationVerification?.routeAssessment
+            ?.needsOfferVerification &&
           isCurrentTargetingLearning(
             {
               targetingFingerprint: prospect.qualificationTargetingFingerprint,

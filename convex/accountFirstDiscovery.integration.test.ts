@@ -80,6 +80,88 @@ afterEach(() => {
   vi.unstubAllEnvs();
 });
 
+test.each(["accepted", "paraphrased", "failure"])(
+  "site-only planner keeps all channels usable after %s model output",
+  async (scenario) => {
+    const { t, workspaceId } = await fixture();
+    const spec = buildLegacyWorkspaceTargetingSpec({
+      description: "B2B offers",
+      profiles: [],
+    });
+    spec.discoveryMode = "peer_or_site_audit";
+    spec.criteria.push({
+      id: "non_competitor",
+      label: "Commercial conflict",
+      description: "Avoid substitutes",
+      kind: "required",
+      category: "profile_fit",
+      evidence: "profile",
+      weight: 5,
+      terms: ["Protected payroll platform"],
+    });
+    const topics = [
+      "industrial pumps",
+      "energy meters",
+      "calibration services",
+      "cargo insurance",
+      "insulation panels",
+      "laboratory testing",
+      "custom tooling",
+      "bulk containers",
+    ];
+    spec.searchHints.activityPhrases = topics;
+    spec.searchHints.roleTitles = ["directeur marketing"];
+    const generated = generation(
+      [],
+      [
+        item(
+          scenario === "accepted" ? topics[3] : "a protected payroll platform"
+        ),
+      ]
+    ) as {
+      object: {
+        linkedinPostQueries: ReturnType<typeof item>[];
+        linkedinPeopleQueries: ReturnType<typeof item>[];
+      };
+    };
+    generated.object.linkedinPostQueries = [
+      item(scenario === "accepted" ? topics[3] : "something similar"),
+    ];
+    generated.object.linkedinPeopleQueries = [item("Protected company CEO")];
+    if (scenario === "failure")
+      vi.mocked(robustGenerateObject).mockRejectedValueOnce(
+        new Error("offline")
+      );
+    else
+      vi.mocked(robustGenerateObject).mockResolvedValueOnce(generated as never);
+    const result = await t.action(
+      internal.agents.internal.convertToSocialQueriesAction,
+      {
+        workspaceId,
+        targetingSpec: spec,
+        keywords: ["Protected payroll platform"],
+        platforms: ["twitter", "linkedin"],
+      }
+    );
+    const channels = result.queriesByPlatform!;
+    for (const queries of [channels.twitter, channels.linkedin.posts]) {
+      expect(queries.length).toBeGreaterThan(0);
+      expect(queries.length).toBeLessThanOrEqual(5);
+      expect(queries.every((query) => topics.includes(query))).toBe(true);
+      if (scenario === "accepted") expect(queries).toEqual([topics[3]]);
+    }
+    expect(channels.linkedin.people).toEqual(["directeur marketing"]);
+    expect(vi.mocked(searchWeb).mock.calls).toHaveLength(2);
+    for (const [query] of vi.mocked(searchWeb).mock.calls)
+      expect(
+        topics.some((topic) => query === topic + " official website")
+      ).toBe(true);
+    const prompt = vi.mocked(robustGenerateObject).mock.calls[0][0].prompt;
+    expect(prompt).toContain("suppression only");
+    expect(prompt).not.toContain("Keep both routes");
+  }
+);
+
 test("peer searches consume one retrieval, skip identities honestly and retry provider outages", async () => {
   const { t, workspaceId } = await fixture();
   const spec = buildLegacyWorkspaceTargetingSpec({
